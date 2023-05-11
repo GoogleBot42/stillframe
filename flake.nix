@@ -2,7 +2,7 @@
   description = "A simple Go project built with Nix";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-22.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/master";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -15,9 +15,7 @@
       {
         packages."dynamic-frame-server" = server;
         packages.default = server;
-        devShell = pkgs.mkShell {
-          buildInputs = [ pkgs.go ];
-        };
+        devShell = pkgs.callPackage ./shell.nix { };
       }
     );
 }

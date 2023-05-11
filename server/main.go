@@ -23,7 +23,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-  fmt.Println("Hello, Nix!")
+	fmt.Println("Hello, Nix!")
 
 	// Create a new Chi router
 	router := chi.NewRouter()
