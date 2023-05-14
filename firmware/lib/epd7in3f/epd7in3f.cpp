@@ -214,7 +214,7 @@ void Epd::EPD_7IN3F_Display(const UBYTE *image)
     {
         for (j = 0; j < width / 2; j++)
         {
-            SendData(image[j + width * i]);
+            SendData(image[j + (width / 2) * i]);
         }
     }
 
