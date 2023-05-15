@@ -12,7 +12,6 @@ import (
 	"image/color"
 	"image/draw"
 	_ "image/gif"
-	"image/jpeg"
 	_ "image/jpeg"
 	_ "image/png"
 
@@ -52,49 +51,18 @@ const (
 )
 
 type ColorDefinition struct {
-	Color color.RGBA
+	Color Colorf
 	Code  EInkColor
 }
 
-// var Colors = []ColorDefinition{
-// 	{color.RGBA{0, 0, 0, 255}, EPD_7IN3F_BLACK},
-// 	{color.RGBA{255, 255, 255, 255}, EPD_7IN3F_WHITE},
-// 	{color.RGBA{0, 255, 0, 255}, EPD_7IN3F_GREEN},
-// 	{color.RGBA{0, 0, 255, 255}, EPD_7IN3F_BLUE},
-// 	{color.RGBA{255, 0, 0, 255}, EPD_7IN3F_RED},
-// 	{color.RGBA{255, 255, 0, 255}, EPD_7IN3F_YELLOW},
-// 	{color.RGBA{255, 165, 0, 255}, EPD_7IN3F_ORANGE},
-// }
-
 var Colors = []ColorDefinition{
-	{color.RGBA{0, 0, 0, 255}, EPD_7IN3F_BLACK},
-	{color.RGBA{255, 255, 255, 255}, EPD_7IN3F_WHITE},
-	{color.RGBA{16, 84, 31, 255}, EPD_7IN3F_GREEN},
-	{color.RGBA{16, 38, 86, 255}, EPD_7IN3F_BLUE},
-	{color.RGBA{147, 17, 3, 255}, EPD_7IN3F_RED},
-	{color.RGBA{251, 193, 2, 255}, EPD_7IN3F_YELLOW},
-	{color.RGBA{203, 66, 5, 255}, EPD_7IN3F_ORANGE},
-}
-
-func ConvertToEInkColor(c color.RGBA) EInkColor {
-	minDist := math.MaxFloat64
-	minCode := EInkColor(0)
-	for _, def := range Colors {
-		dist := colorDistance(c, def.Color)
-		if dist < minDist {
-			minDist = dist
-			minCode = def.Code
-		}
-	}
-	return minCode
-}
-
-func colorDistance(a, b color.RGBA) float64 {
-	// r := float64(a.R) - float64(b.R)
-	// g := float64(a.G) - float64(b.G)
-	// bb := float64(a.B) - float64(b.B)
-	// return math.Sqrt(r*r + g*g + bb*bb)
-	return ciede2000.Diff(a, b)
+	{Colorf{0, 0, 0}, EPD_7IN3F_BLACK},
+	{Colorf{1, 1, 1}, EPD_7IN3F_WHITE},
+	{Colorf{0.059, 0.329, 0.119}, EPD_7IN3F_GREEN},
+	{Colorf{0.061, 0.147, 0.336}, EPD_7IN3F_BLUE},
+	{Colorf{0.574, 0.066, 0.010}, EPD_7IN3F_RED},
+	{Colorf{0.982, 0.756, 0.004}, EPD_7IN3F_YELLOW},
+	{Colorf{0.795, 0.255, 0.018}, EPD_7IN3F_ORANGE},
 }
 
 func imageToRGBA(src image.Image) *image.RGBA {
@@ -110,20 +78,144 @@ func imageToRGBA(src image.Image) *image.RGBA {
 	return dst
 }
 
-func ConvertToEInkImage(src image.Image) []byte {
-	rgbImage := imageToRGBA(src)
+// Colorf represents a color with float64 RGB values.
+type Colorf struct {
+	R, G, B float64
+}
 
-	var image []byte
+// Convert an image to a 2D array of Colorf.
+func convertImageToColors(src image.Image) [][]Colorf {
+	img := imageToRGBA(src)
 
-	for y := 0; y < src.Bounds().Max.Y; y++ {
-		for x := 0; x < src.Bounds().Max.X; x++ {
-			image = append(image, byte(ConvertToEInkColor(rgbImage.RGBAAt(x, y))))
+	bounds := img.Bounds()
+	width, height := bounds.Max.X, bounds.Max.Y
+
+	// Initialize the 2D slice.
+	colorfImg := make([][]Colorf, height)
+	for i := range colorfImg {
+		colorfImg[i] = make([]Colorf, width)
+	}
+
+	// Iterate over each pixel.
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+
+			// Convert the uint32 color values to float64, normalized to [0, 1].
+			colorf := Colorf{
+				R: float64(r) / 0xffff,
+				G: float64(g) / 0xffff,
+				B: float64(b) / 0xffff,
+			}
+
+			colorfImg[y][x] = colorf
 		}
 	}
 
-	image = packBytesIntoNibbles(image)
+	return colorfImg
+}
 
-	return image
+func convertToRGBA(colorf Colorf) color.RGBA {
+	// Convert the float64 color values to uint8, and ignore the alpha channel.
+	return color.RGBA{
+		R: uint8(colorf.R * 255),
+		G: uint8(colorf.G * 255),
+		B: uint8(colorf.B * 255),
+		A: 255,
+	}
+}
+
+func subtractColorf(c1, c2 Colorf) Colorf {
+	return Colorf{
+		R: c1.R - c2.R,
+		G: c1.G - c2.G,
+		B: c1.B - c2.B,
+	}
+}
+
+func addColorf(c1, c2 Colorf) Colorf {
+	return Colorf{
+		R: c1.R + c2.R,
+		G: c1.G + c2.G,
+		B: c1.B + c2.B,
+	}
+}
+
+func multColor(c Colorf, m float64) Colorf {
+	return Colorf{
+		R: c.R * m,
+		G: c.G * m,
+		B: c.B * m,
+	}
+}
+
+func clampColor(value Colorf, min, max float64) Colorf {
+	return Colorf{
+		R: clamp(value.R, min, max),
+		G: clamp(value.G, min, max),
+		B: clamp(value.B, min, max),
+	}
+}
+
+func clamp(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func ditherFloydSteinberg(image [][]Colorf, x int, y int, diff Colorf) {
+	height := len(image)
+	width := len(image[0])
+
+	if x < 0 || y < 0 || x >= width || y >= height {
+		return
+	}
+
+	image[y][x] = clampColor(addColorf(image[y][x], diff), 0, 1)
+}
+
+func ConvertToEInkImage(src image.Image) []byte {
+	bounds := src.Bounds()
+	width, height := bounds.Max.X, bounds.Max.Y
+
+	image := convertImageToColors(src)
+
+	var einkImage []byte
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			// find closest color
+			minDist := math.MaxFloat64
+			bestColorCode := EInkColor(0)
+			bestColor := Colorf{0, 0, 0}
+			for _, def := range Colors {
+				dist := ciede2000.Diff(convertToRGBA(image[y][x]), convertToRGBA(def.Color))
+				if dist < minDist {
+					minDist = dist
+					bestColorCode = def.Code
+					bestColor = def.Color
+				}
+			}
+
+			einkImage = append(einkImage, byte(bestColorCode))
+
+			// dither colors using Floyd-Steinberg to create the illusion of shading
+			diff := subtractColorf(image[y][x], bestColor)
+
+			ditherFloydSteinberg(image, x+1, y, multColor(diff, 7.0/16.0))
+			ditherFloydSteinberg(image, x-1, y+1, multColor(diff, 3.0/16.0))
+			ditherFloydSteinberg(image, x, y+1, multColor(diff, 5.0/16.0))
+			ditherFloydSteinberg(image, x+1, y+1, multColor(diff, 1.0/16.0))
+		}
+	}
+
+	einkImage = packBytesIntoNibbles(einkImage)
+
+	return einkImage
 }
 
 func packBytesIntoNibbles(input []byte) []byte {
@@ -163,51 +255,7 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 
 	resizedImg := resize.Resize(800, 480, croppedImg, resize.Lanczos3)
 
-	// Now you can save the cropped image
-	outFile, err := os.Create("cropped_image.jpg")
-	if err != nil {
-		fmt.Println("Error: File could not be created")
-		os.Exit(1)
-	}
-	defer outFile.Close()
-
-	err = jpeg.Encode(outFile, resizedImg, nil)
-	if err != nil {
-		fmt.Println("Error: Image could not be encoded")
-		os.Exit(1)
-	}
-
-	fmt.Println("Cropped image saved successfully")
-
-	// data := ConvertToEInkImage(resizedImg)
-
-	colors := []EInkColor{
-		EPD_7IN3F_BLACK, EPD_7IN3F_BLUE, EPD_7IN3F_GREEN, EPD_7IN3F_ORANGE,
-		EPD_7IN3F_RED, EPD_7IN3F_YELLOW, EPD_7IN3F_WHITE, EPD_7IN3F_WHITE,
-	}
-
-	var data []byte
-
-	for i := 0; i < 240; i++ {
-		for k := 0; k < 4; k++ {
-			for j := 0; j < 100; j++ {
-				data = append(data, (byte(colors[k]<<4))|byte(colors[k]))
-			}
-		}
-	}
-
-	for i := 0; i < 240; i++ {
-		for k := 4; k < 8; k++ {
-			for j := 0; j < 100; j++ {
-				data = append(data, (byte(colors[k]<<4))|byte(colors[k]))
-			}
-		}
-	}
-
-	// // Fill the array with byte K
-	// for i := 0; i < 800*480/2; i++ {
-	// 	data = append(data, (colors[0]<<4)|colors[6])
-	// }
+	data := ConvertToEInkImage(resizedImg)
 
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	fmt.Printf("Bytes to send: %+v\n", len(data))
