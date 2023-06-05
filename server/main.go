@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	_ "image/png"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 // Define a function to handle incoming requests
@@ -27,22 +29,32 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Hello, %s!\n", name)
 }
 
-var colorSpace = ColorSpace{
-	{Colorf{0, 0, 0}, 0x0},
-	{Colorf{1, 1, 1}, 0x1},
-	{Colorf{0.059, 0.329, 0.119}, 0x2},
-	{Colorf{0.061, 0.147, 0.336}, 0x3},
-	{Colorf{0.574, 0.066, 0.010}, 0x4},
-	{Colorf{0.982, 0.756, 0.004}, 0x5},
-	{Colorf{0.795, 0.255, 0.018}, 0x6},
+type ImageProperties struct {
+	Width      int        `json:"width"`
+	Height     int        `json:"height"`
+	ColorSpace ColorSpace `json:"color_space"`
 }
 
-func getImage(w http.ResponseWriter, r *http.Request) {
+func fetchImage(w http.ResponseWriter, r *http.Request) {
+	var imageProps ImageProperties
+	err := json.NewDecoder(r.Body).Decode(&imageProps)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Now you can access the fields of imageProps, e.g.:
+	fmt.Printf("Received request for an image with width: %d, height: %d\n", imageProps.Width, imageProps.Height)
+	for _, color := range imageProps.ColorSpace {
+		fmt.Printf("Color code: %d, RGB: %v\n", color.Code, color.Color)
+	}
+
 	// img := ReadImage("image.jpg")
 	// img := ReadImage("image-out.jpg")
-	img := ReadImage("dahlia-out.jpg")
-	bestCrop := GetBestPieceOfImage(800, 480, img)
-	data := ConvertToEInkImage(bestCrop, colorSpace)
+	// img := ReadImage("dahlia-out.jpg")
+	img := ReadImage("dahlia.jpg")
+	bestCrop := GetBestPieceOfImage(imageProps.Width, imageProps.Height, img)
+	data := ConvertToEInkImage(bestCrop, imageProps.ColorSpace)
 
 	fmt.Printf("Bytes to send: %+v\n", len(data))
 
@@ -67,14 +79,19 @@ func main() {
 	// Create a new Chi router
 	router := chi.NewRouter()
 
+	router.Use(middleware.RequestID)
+	router.Use(middleware.RealIP)
+	router.Use(middleware.Logger)
+	router.Use(middleware.Recoverer)
+
 	// Register the requestHandler function to handle requests at the root path
 	// and a path with the 'name' parameter
 	router.Get("/", requestHandler)
 	router.Get("/{name}", requestHandler)
 
 	router.Group(func(r chi.Router) {
-		// r.Use(basicAuth)
-		r.Get("/getImage", getImage)
+		r.Use(basicAuth)
+		r.Post("/fetchImage", fetchImage)
 	})
 
 	// Start the HTTP server on port 8080 and log any errors

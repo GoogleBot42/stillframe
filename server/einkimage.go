@@ -9,44 +9,45 @@ import (
 
 // Maps RGB colors to the eink display's color values
 type ColorSpace []struct {
-	Color Colorf
-	Code  uint8
-}
-
-func ditherPixel(image [][]Colorf, x int, y int, diff Colorf) {
-	height := len(image)
-	width := len(image[0])
-
-	if x < 0 || y < 0 || x >= width || y >= height {
-		return
-	}
-
-	image[y][x] = clampColor(addColorf(image[y][x], diff), 0, 1)
+	Color Colorf `json:"rgb_color"`
+	Code  uint8  `json:"color_code"`
 }
 
 func ditherFloydSteinberg(image [][]Colorf, x int, y int, color Colorf) {
-	ditherPixel(image, x+1, y, multColor(color, 7.0/16.0))
-	ditherPixel(image, x-1, y+1, multColor(color, 3.0/16.0))
-	ditherPixel(image, x, y+1, multColor(color, 5.0/16.0))
-	ditherPixel(image, x+1, y+1, multColor(color, 1.0/16.0))
+	ditherPixel := func(x int, y int, color Colorf) {
+		height := len(image)
+		width := len(image[0])
+
+		if x < 0 || y < 0 || x >= width || y >= height {
+			return
+		}
+
+		image[y][x] = clampColor(addColorf(image[y][x], color), 0, 1)
+	}
+
+	ditherPixel(x+1, y, multColor(color, 7.0/16.0))
+	ditherPixel(x-1, y+1, multColor(color, 3.0/16.0))
+	ditherPixel(x, y+1, multColor(color, 5.0/16.0))
+	ditherPixel(x+1, y+1, multColor(color, 1.0/16.0))
 }
 
 func ConvertToEInkImage(src image.Image, colorSpace ColorSpace) []byte {
 	bounds := src.Bounds()
 	width, height := bounds.Max.X, bounds.Max.Y
 
-	image := convertImageToColors(src)
+	image := ConvertImageToColors(src)
 
 	var einkImage []byte
 
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			// find closest color
+			imageColor := CorrectGamma(image[y][x])
 			minDist := math.MaxFloat64
 			bestColorCode := uint8(0x0)
 			bestColor := Colorf{0, 0, 0}
 			for _, def := range colorSpace {
-				dist := ciede2000.Diff(convertToRGBA(image[y][x]), convertToRGBA(def.Color))
+				dist := ciede2000.Diff(convertToRGBA(imageColor), convertToRGBA(def.Color))
 				if dist < minDist {
 					minDist = dist
 					bestColorCode = def.Code
@@ -57,7 +58,7 @@ func ConvertToEInkImage(src image.Image, colorSpace ColorSpace) []byte {
 			einkImage = append(einkImage, byte(bestColorCode))
 
 			// dither the remaining color using Floyd-Steinberg to create the illusion of shading
-			diff := subtractColorf(image[y][x], bestColor)
+			diff := subtractColorf(imageColor, bestColor)
 			ditherFloydSteinberg(image, x, y, diff)
 		}
 	}

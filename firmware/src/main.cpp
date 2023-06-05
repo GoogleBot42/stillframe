@@ -11,6 +11,43 @@ const char* serverName = "http://192.168.3.133:8080/getImage";
 
 Epd epd;
 
+const char* einkDisplayProperties = R"json(
+{
+  "width": 800,
+  "height": 480,
+  "color_space": [
+    {
+      "rgb_color": [0, 0, 0],
+      "color_code": 0
+    },
+    {
+      "rgb_color": [1, 1, 1],
+      "color_code": 1
+    },
+    {
+      "rgb_color": [0.059, 0.329, 0.119],
+      "color_code": 2
+    },
+    {
+      "rgb_color": [0.061, 0.147, 0.336],
+      "color_code": 3
+    },
+    {
+      "rgb_color": [0.574, 0.066, 0.010],
+      "color_code": 4
+    },
+    {
+      "rgb_color": [0.982, 0.756, 0.004],
+      "color_code": 5
+    },
+    {
+      "rgb_color": [0.795, 0.255, 0.018],
+      "color_code": 6
+    }
+  ]
+}
+)json";
+
 void setup()
 {
   // put your setup code here, to run once:
@@ -51,9 +88,10 @@ void fetchAndDrawImage() {
   HTTPClient http;
 
   http.begin(serverName);
-  // http.setAuthorization("username", "password");
-
-  int httpCode = http.GET();
+  http.setTimeout(20000); // wait up to 20 seconds for response
+  http.setAuthorization("username", "password");
+  http.addHeader("Content-Type", "application/json");
+  int httpCode = http.POST(einkDisplayProperties);
 
   if (httpCode > 0) {
       int length = http.getSize();

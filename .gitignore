@@ -1,3 +1,4 @@
 result
 .pio
 firmware/.vscode
+firmware/.gitignore
