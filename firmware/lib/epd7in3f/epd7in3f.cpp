@@ -29,6 +29,8 @@
 #
 ******************************************************************************/
 
+#ifdef EPD7IN3F
+
 #include <stdlib.h>
 #include "epd7in3f.h"
 
@@ -317,5 +319,7 @@ void Epd::Sleep(void)
     DelayMs(10);
     DigitalWrite(RST_PIN, 0); // Reset
 }
+
+#endif
 
 /* END OF FILE */

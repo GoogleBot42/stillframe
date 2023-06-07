@@ -96,7 +96,7 @@ func GetBestPieceOfImage(width, height int, img image.Image) image.Image {
 	}
 	croppedImg := img.(SubImager).SubImage(bestCrop)
 
-	resizedImg := resize.Resize(800, 480, croppedImg, resize.Lanczos3)
+	resizedImg := resize.Resize(uint(width), uint(height), croppedImg, resize.Lanczos3)
 
 	return resizedImg
 }

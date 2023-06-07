@@ -3,9 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"time"
 
 	_ "image/gif"
 	_ "image/jpeg"
@@ -29,10 +34,33 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Hello, %s!\n", name)
 }
 
+func getRandomFile(dir string) (string, error) {
+	files, err := ioutil.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+
+	rand.Seed(time.Now().UnixNano())
+	n := rand.Intn(len(files))
+
+	for _, file := range files {
+		if !file.IsDir() {
+			if n == 0 {
+				return filepath.Join(dir, file.Name()), nil
+			}
+			n--
+		}
+	}
+
+	return "", os.ErrNotExist
+}
+
 type ImageProperties struct {
-	Width      int        `json:"width"`
-	Height     int        `json:"height"`
-	ColorSpace ColorSpace `json:"color_space"`
+	Width         int        `json:"width"`
+	Height        int        `json:"height"`
+	FlipVertical  bool       `json:"flip_vertical"`
+	FlipHorizonal bool       `json:"flip_horizonal"`
+	ColorSpace    ColorSpace `json:"color_space"`
 }
 
 func fetchImage(w http.ResponseWriter, r *http.Request) {
@@ -49,11 +77,13 @@ func fetchImage(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Color code: %d, RGB: %v\n", color.Code, color.Color)
 	}
 
-	// img := ReadImage("image.jpg")
-	// img := ReadImage("image-out.jpg")
-	// img := ReadImage("dahlia-out.jpg")
-	img := ReadImage("dahlia.jpg")
-	bestCrop := GetBestPieceOfImage(imageProps.Width, imageProps.Height, img)
+	randomImgFile, _ := getRandomFile("img")
+	fmt.Println("Serving random image file:", randomImgFile)
+
+	img := ReadImage(randomImgFile)
+
+	flippedImage := flipImage(img, imageProps.FlipVertical, imageProps.FlipHorizonal)
+	bestCrop := GetBestPieceOfImage(imageProps.Width, imageProps.Height, flippedImage)
 	data := ConvertToEInkImage(bestCrop, imageProps.ColorSpace)
 
 	fmt.Printf("Bytes to send: %+v\n", len(data))

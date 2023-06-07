@@ -28,6 +28,8 @@
 #include "epdif.h"
 #include <SPI.h>
 
+#ifdef EPD7IN3F
+
 EpdIf::EpdIf(){};
 
 EpdIf::~EpdIf(){};
@@ -65,3 +67,5 @@ int EpdIf::IfInit(void)
 
     return 0;
 }
+
+#endif

@@ -140,3 +140,29 @@ func clamp(value, min, max float64) float64 {
 	}
 	return value
 }
+
+func flipImage(img image.Image, vertical, horizontal bool) image.Image {
+	bounds := img.Bounds()
+	width, height := bounds.Max.X, bounds.Max.Y
+
+	newImg := image.NewRGBA(image.Rect(0, 0, width, height))
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			srcX, srcY := x, y
+
+			if horizontal {
+				srcX = width - x - 1
+			}
+
+			if vertical {
+				srcY = height - y - 1
+			}
+
+			c := img.At(srcX, srcY)
+			newImg.Set(x, y, c)
+		}
+	}
+
+	return newImg
+}
