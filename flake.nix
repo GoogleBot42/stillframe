@@ -11,10 +11,12 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         server = pkgs.callPackage ./server { };
+        firmware = pkgs.callPackage ./firmware { };
       in
       {
         packages = {
           inherit (server) server smartcrop;
+          inherit firmware;
         };
         packages.default = server.server;
         devShell = pkgs.callPackage ./shell.nix { };
