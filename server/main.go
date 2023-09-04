@@ -63,6 +63,22 @@ type ImageProperties struct {
 	ColorSpace    ColorSpace `json:"color_space"`
 }
 
+func calibrationImage(w http.ResponseWriter, r *http.Request) {
+	var imageProps ImageProperties
+	err := json.NewDecoder(r.Body).Decode(&imageProps)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	data := GenerateCalibrationImage(imageProps.Width, imageProps.Height, imageProps.ColorSpace)
+
+	fmt.Printf("Bytes to send: %+v\n", len(data))
+
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Write(data)
+}
+
 func fetchImage(w http.ResponseWriter, r *http.Request) {
 	var imageProps ImageProperties
 	err := json.NewDecoder(r.Body).Decode(&imageProps)
@@ -120,8 +136,9 @@ func main() {
 	router.Get("/{name}", requestHandler)
 
 	router.Group(func(r chi.Router) {
-		r.Use(basicAuth)
+		// r.Use(basicAuth)
 		r.Post("/fetchImage", fetchImage)
+		r.Post("/calibrationImage", calibrationImage)
 	})
 
 	// Start the HTTP server on port 8080 and log any errors

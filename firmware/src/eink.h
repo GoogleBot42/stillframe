@@ -157,10 +157,6 @@ const char* einkDisplayProperties = R"json(
 )json";
 
 void initDisplay() {
-  pinMode(CS, OUTPUT);
-  pinMode(RESET, OUTPUT);
-  pinMode(HRDY, INPUT);
-
   IT8951_Init();
 }
 

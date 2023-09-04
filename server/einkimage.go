@@ -69,6 +69,40 @@ func ConvertToEInkImage(src image.Image, colorSpace ColorSpace) []byte {
 	return einkImage
 }
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func GenerateCalibrationImage(width, height int, colorSpace ColorSpace) []byte {
+	var einkImage []byte
+
+	colorCount := len(colorSpace)
+
+	// calculate number of rows and columns (sideLength)
+	sideLengthFloat := math.Sqrt(float64(colorCount))
+	sideLength := int(sideLengthFloat)
+	if float64(sideLength) != sideLengthFloat {
+		sideLength = sideLength + 1
+	}
+
+	rowSpacing := height / sideLength
+	columnSpacing := width / sideLength
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			row := y / rowSpacing
+			column := x / columnSpacing
+			colorIndex := min(colorCount-1, row*sideLength+column)
+			einkImage = append(einkImage, colorSpace[colorIndex].Code)
+		}
+	}
+
+	return packBytesIntoNibbles(einkImage)
+}
+
 func packBytesIntoNibbles(input []byte) []byte {
 	// input length must divisible by 2
 
