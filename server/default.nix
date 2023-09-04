@@ -2,6 +2,8 @@
 , python3
 , fetchFromGitHub
 , makeWrapper
+, buildGoModule
+, stdenv
 }:
 
 with python3.pkgs;
@@ -57,10 +59,35 @@ let
     '';
   };
 
+  server = buildGoModule rec {
+    pname = "dynamic-frame-server";
+    version = "0.0.1";
+
+    src = ./.;
+
+    vendorSha256 = "qr3hNJxCT8YPQntKCCPNO2yaETswziGXAd4lQELsDGg=";
+  };
+
+  # Wrap server so it has access to smartcrop in its PATH
+  serverWrapped = stdenv.mkDerivation {
+    pname = server.pname;
+    version = server.version;
+    src = server;
+
+    buildInputs = [ makeWrapper ];
+
+    installPhase = ''
+      mkdir -p $out/bin
+      cp ${server}/bin/* $out/bin/
+
+      wrapProgram $out/bin/server \
+        --set PATH "${smartcrop-cli}/bin:$PATH"
+    '';
+
+    meta.mainProgram = "server";
+  };
 in
-
-# python3.withPackages (ps: with ps; [
-#   smartcrop
-# ])
-
-smartcrop-cli
+{
+  server = serverWrapped;
+  smartcrop = smartcrop-cli;
+}

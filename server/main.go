@@ -20,19 +20,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-// Define a function to handle incoming requests
-func requestHandler(w http.ResponseWriter, r *http.Request) {
-	// Get the 'name' variable from the request
-	name := chi.URLParam(r, "name")
-
-	// Use a default value if 'name' is not present
-	if name == "" {
-		name = "World"
-	}
-
-	// Respond with a greeting message
-	fmt.Fprintf(w, "Hello, %s!\n", name)
-}
+var imageDir = "./img"
 
 func getRandomFile(dir string) (string, error) {
 	files, err := ioutil.ReadDir(dir)
@@ -120,9 +108,11 @@ func basicAuth(next http.Handler) http.Handler {
 }
 
 func main() {
-	fmt.Println("Starting server")
+	if len(os.Args) > 1 {
+		imageDir = os.Args[1]
+	}
+	fmt.Println("Choosing images from: ", imageDir)
 
-	// Create a new Chi router
 	router := chi.NewRouter()
 
 	router.Use(middleware.RequestID)
@@ -130,16 +120,13 @@ func main() {
 	router.Use(middleware.Logger)
 	router.Use(middleware.Recoverer)
 
-	// Register the requestHandler function to handle requests at the root path
-	// and a path with the 'name' parameter
-	router.Get("/", requestHandler)
-	router.Get("/{name}", requestHandler)
-
 	router.Group(func(r chi.Router) {
 		// r.Use(basicAuth)
 		r.Post("/fetchImage", fetchImage)
 		r.Post("/calibrationImage", calibrationImage)
 	})
+
+	fmt.Println("Started server")
 
 	// Start the HTTP server on port 8080 and log any errors
 	log.Fatal(http.ListenAndServe("0.0.0.0:8080", router))

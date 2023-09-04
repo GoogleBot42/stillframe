@@ -10,13 +10,13 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        server = pkgs.callPackage ./server/server.nix { };
-        smartcrop = pkgs.callPackage ./server/smartcrop.nix { };
+        server = pkgs.callPackage ./server { };
       in
       {
-        packages."dynamic-frame-server" = server;
-        packages."dynamic-frame-smartcrop" = smartcrop;
-        packages.default = server;
+        packages = {
+          inherit (server) server smartcrop;
+        };
+        packages.default = server.server;
         devShell = pkgs.callPackage ./shell.nix { };
       }
     );
