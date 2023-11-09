@@ -21,6 +21,7 @@ import (
 )
 
 var imageDir = "./img"
+var port = "8080"
 
 func getRandomFile(dir string) (string, error) {
 	files, err := ioutil.ReadDir(dir)
@@ -109,7 +110,12 @@ func basicAuth(next http.Handler) http.Handler {
 
 func main() {
 	if len(os.Args) > 1 {
-		imageDir = os.Args[1]
+		port = os.Args[1]
+	}
+	fmt.Println("Starting on port: ", port)
+
+	if len(os.Args) > 2 {
+		imageDir = os.Args[2]
 	}
 	fmt.Println("Choosing images from: ", imageDir)
 
@@ -128,6 +134,6 @@ func main() {
 
 	fmt.Println("Started server")
 
-	// Start the HTTP server on port 8080 and log any errors
-	log.Fatal(http.ListenAndServe("0.0.0.0:8080", router))
+	// Start the HTTP server
+	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, router))
 }
