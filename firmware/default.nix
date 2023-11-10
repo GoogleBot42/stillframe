@@ -12,8 +12,7 @@ pkgs.stdenv.mkDerivation rec {
   '';
 
   installPhase = ''
-    mkdir -p $out/bin
-    cp .pio/build/*/firmware.bin $out/bin/
+    cp -r .pio/build/* $out/
   '';
 
   __noChroot = true;

@@ -2,14 +2,9 @@
 
 #ifdef EPD7IN3F
 
-#define BUSY_PIN 26
-#define RST_PIN 27
-#define DC_PIN 15
-#define CS_PIN 14
-
 #include "epd7in3f.h"
 
-const char* einkDisplayProperties = R"json(
+const char *einkDisplayProperties = R"json(
 {
   "width": 800,
   "height": 480,
@@ -48,7 +43,8 @@ const char* einkDisplayProperties = R"json(
 
 Epd epd;
 
-void initDisplay() {
+void initDisplay()
+{
   if (epd.Init() != 0)
   {
     Serial.print("e-Paper init failed");
@@ -56,7 +52,8 @@ void initDisplay() {
   }
 }
 
-void drawImage(uint8_t* image) {
+void drawImage(uint8_t *image)
+{
   // Serial.print("Wake up display\n");
   // epd.Reset();
   // Serial.print("Clear display\n");
@@ -82,7 +79,7 @@ void drawImage(uint8_t* image) {
 #define DISPLAY_WIDTH 1872
 #define DISPLAY_HEIGHT 1404
 
-const char* einkDisplayProperties = R"json(
+const char *einkDisplayProperties = R"json(
 {
   "width": 1872,
   "height": 1404,
@@ -156,19 +153,21 @@ const char* einkDisplayProperties = R"json(
 }
 )json";
 
-void initDisplay() {
+void initDisplay()
+{
   IT8951_Init();
 }
 
-void drawImage(uint8_t* image) {
-    gpFrameBuf = image;
-    Serial.println("Sending image");
-    IT8951_BMP_Example(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    Serial.println("Displaying image");
-    IT8951DisplayArea(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, 2);
-    Serial.println("Waiting for display ...");
-    LCDWaitForReady();
-    Serial.println("done");
+void drawImage(uint8_t *image)
+{
+  gpFrameBuf = image;
+  Serial.println("Sending image");
+  IT8951_BMP_Example(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+  Serial.println("Displaying image");
+  IT8951DisplayArea(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, 2);
+  Serial.println("Waiting for display ...");
+  LCDWaitForReady();
+  Serial.println("done");
 }
 
 #endif

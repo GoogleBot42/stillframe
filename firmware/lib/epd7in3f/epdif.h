@@ -30,6 +30,11 @@
 
 #include <Arduino.h>
 
+#define BUSY_PIN 26
+#define RST_PIN 27
+#define DC_PIN 15
+#define CS_PIN 14
+
 class EpdIf
 {
 public:
