@@ -36,14 +36,11 @@
 
 Epd::~Epd(){};
 
-Epd::Epd()
+Epd::Epd(UWORD width, UWORD height, int busyPin, int restPin, int dcPin, int csPin)
+    : EpdIf(busyPin, restPin, dcPin, csPin)
 {
-    reset_pin = RST_PIN;
-    dc_pin = DC_PIN;
-    cs_pin = CS_PIN;
-    busy_pin = BUSY_PIN;
-    width = EPD_WIDTH;
-    height = EPD_HEIGHT;
+    width = width;
+    height = height;
 };
 
 /******************************************************************************
@@ -168,7 +165,7 @@ void Epd::SendData(unsigned char data)
 
 void Epd::EPD_7IN3F_BusyHigh(void) // If BUSYN=0 then waiting
 {
-    while (!DigitalRead(BUSY_PIN))
+    while (!DigitalRead(busy_pin))
     {
         DelayMs(1);
     }
@@ -317,7 +314,7 @@ void Epd::Sleep(void)
     SendCommand(0x07);
     SendData(0xA5);
     DelayMs(10);
-    DigitalWrite(RST_PIN, 0); // Reset
+    DigitalWrite(reset_pin, 0); // Reset
 }
 
 #endif

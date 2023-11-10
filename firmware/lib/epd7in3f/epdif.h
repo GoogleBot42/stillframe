@@ -30,22 +30,23 @@
 
 #include <Arduino.h>
 
-#define BUSY_PIN 26
-#define RST_PIN 27
-#define DC_PIN 15
-#define CS_PIN 14
-
 class EpdIf
 {
 public:
-    EpdIf(void);
+    EpdIf(int busyPin, int restPin, int dcPin, int csPin);
     ~EpdIf(void);
 
-    static int IfInit(void);
-    static void DigitalWrite(int pin, int value);
-    static int DigitalRead(int pin);
-    static void DelayMs(unsigned int delaytime);
-    static void SpiTransfer(unsigned char data);
+    int IfInit(void);
+    void DigitalWrite(int pin, int value);
+    int DigitalRead(int pin);
+    void DelayMs(unsigned int delaytime);
+    void SpiTransfer(unsigned char data);
+
+protected:
+    unsigned int reset_pin;
+    unsigned int dc_pin;
+    unsigned int cs_pin;
+    unsigned int busy_pin;
 };
 
 #endif

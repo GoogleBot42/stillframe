@@ -34,10 +34,6 @@
 
 #include "epdif.h"
 
-// Display resolution
-#define EPD_WIDTH 800
-#define EPD_HEIGHT 480
-
 #define UWORD unsigned int
 #define UBYTE unsigned char
 #define UDOUBLE unsigned long
@@ -57,7 +53,7 @@ Color Index
 class Epd : EpdIf
 {
 public:
-    Epd();
+    Epd(UWORD width, UWORD height, int busyPin, int restPin, int dcPin, int csPin);
     ~Epd();
     int Init(void);
     void EPD_7IN3F_BusyHigh(void);
@@ -73,10 +69,6 @@ public:
     void Clear(UBYTE color);
 
 private:
-    unsigned int reset_pin;
-    unsigned int dc_pin;
-    unsigned int cs_pin;
-    unsigned int busy_pin;
     unsigned long width;
     unsigned long height;
 };

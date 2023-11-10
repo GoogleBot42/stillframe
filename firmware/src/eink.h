@@ -4,6 +4,14 @@
 
 #include "epd7in3f.h"
 
+#define DISPLAY_WIDTH 800
+#define DISPLAY_HEIGHT 480
+
+#define BUSY_PIN 26
+#define RST_PIN 27
+#define DC_PIN 15
+#define CS_PIN 14
+
 const char *einkDisplayProperties = R"json(
 {
   "width": 800,
@@ -41,7 +49,7 @@ const char *einkDisplayProperties = R"json(
 }
 )json";
 
-Epd epd;
+Epd epd(DISPLAY_WIDTH, DISPLAY_HEIGHT, BUSY_PIN, RST_PIN, DC_PIN, CS_PIN);
 
 void initDisplay()
 {
