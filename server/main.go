@@ -82,7 +82,7 @@ func fetchImage(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Color code: %d, RGB: %v\n", color.Code, color.Color)
 	}
 
-	randomImgFile, _ := getRandomFile("img")
+	randomImgFile, _ := getRandomFile(imageDir)
 	fmt.Println("Serving random image file:", randomImgFile)
 
 	img := ReadImage(randomImgFile)
