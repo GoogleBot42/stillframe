@@ -3,12 +3,14 @@
 #include <HTTPClient.h>
 
 #include "eink.h"
+#include "network.h"
 
 void fetchAndDrawImage();
 
-const char* ssid = "";
-const char* password =  "";
-const char* serverName = "http://192.168.3.133:8080/fetchImage";
+const char *ssid = WIFI_SSID;
+const char *password = WIFI_PASSWORD;
+
+const char *serverName = "http://192.168.3.133:8080/fetchImage";
 
 void setup()
 {
