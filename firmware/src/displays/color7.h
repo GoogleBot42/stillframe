@@ -53,18 +53,18 @@ void initDisplay()
 {
   if (epd.Init() != 0)
   {
-    Serial.print("e-Paper init failed");
+    Serial.println("e-Paper init failed");
     return;
   }
 }
 
 void drawImage(uint8_t *image)
 {
-  Serial.print("Wake up display\n");
+  Serial.println("Wake up display");
   epd.Reset();
-  Serial.print("Draw image\n");
+  Serial.println("Draw image");
   epd.EPD_7IN3F_Display(image);
-  Serial.print("Put display to sleep\n");
+  Serial.println("Put display to sleep");
   epd.Sleep();
 }
 #endif

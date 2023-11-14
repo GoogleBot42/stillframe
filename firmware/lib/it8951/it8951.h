@@ -454,8 +454,10 @@ void IT8951DisplayArea(uint16_t usX, uint16_t usY, uint16_t usW, uint16_t usH, u
   LCDWriteData(usDpyMode);
 }
 
-void IT8951_BMP_Example(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+void IT8951_BMP(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t *image)
 {
+  gpFrameBuf = image;
+
   IT8951LdImgInfo stLdImgInfo;
   IT8951AreaImgInfo stAreaImgInfo;
   
@@ -475,6 +477,6 @@ void IT8951_BMP_Example(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
   
   //Load Image from Host to IT8951 Image Buffer
   IT8951HostAreaPackedPixelWrite(&stLdImgInfo, &stAreaImgInfo);//Display function 2
-  //Display Area ?V (x,y,w,h) with mode 2 for fast gray clear mode - depends on current waveform 
-  //IT8951DisplayArea(0,0, gstI80DevInfo.usPanelW, gstI80DevInfo.usPanelH, 2);
+  //Display Area ?V (x,y,w,h) with mode 2 for fast gray clear mode - depends on current waveform
+  IT8951DisplayArea(0, 0, w, h, 2);
 }

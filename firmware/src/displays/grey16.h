@@ -93,14 +93,15 @@ void initDisplay()
 
 void drawImage(uint8_t *image)
 {
-    gpFrameBuf = image;
-    Serial.println("Sending image");
-    IT8951_BMP_Example(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    Serial.println("Displaying image");
-    IT8951DisplayArea(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, 2);
-    Serial.println("Waiting for display ...");
+    Serial.println("Wake up display");
+    IT8951SystemRun();
+    Serial.println("Draw image");
+    IT8951_BMP(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, image);
+    Serial.println("Waiting for display to finish...");
     LCDWaitForReady();
-    Serial.println("done");
+    Serial.println("Done");
+    Serial.println("Putting display to sleep.");
+    IT8951Sleep();
 }
 
 #endif
