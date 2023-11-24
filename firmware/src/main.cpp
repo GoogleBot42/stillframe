@@ -36,13 +36,17 @@ void setup()
   Serial.print("Connected! IP Address: ");
   Serial.println(WiFi.localIP());
 
-  fetchAndDrawImage();
+  // fetchAndDrawImage(clearImage);
+  // fetchAndDrawImage(calibrationImage);
+  fetchAndDrawImage(fetchImage);
+
+  hibernate_and_restart();
 }
 
-void fetchAndDrawImage() {
+void fetchAndDrawImage(const char* url) {
   HTTPClient http;
 
-  http.begin(serverName);
+  http.begin(url);
   http.setTimeout(40000); // wait up to 40 seconds for response
   http.setAuthorization("username", "password");
   http.addHeader("Content-Type", "application/json");
@@ -65,12 +69,13 @@ void fetchAndDrawImage() {
   }
 
   http.end();
-
-  hibernate_and_restart();
 }
 
 void hibernate_and_restart() {
   // Go to sleep and wake up later
+  Serial.print("Begining hibernation. Waking up in ");
+  Serial.print(HIBERNATE_TIME_SEC);
+  Serial.println(" seconds");
 
   // Configure wake up source as timer
   esp_sleep_enable_timer_wakeup(HIBERNATE_TIME_SEC * 1000000);

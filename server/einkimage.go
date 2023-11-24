@@ -103,6 +103,22 @@ func GenerateCalibrationImage(width, height int, colorSpace ColorSpace) []byte {
 	return packBytesIntoNibbles(einkImage)
 }
 
+func GenerateClearImage(width, height int, colorSpace ColorSpace) []byte {
+	var einkImage []byte
+
+	// Assume the first color is white
+	// What really matters is that the color is the same for the enitre image
+	clearIndex := 3
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			einkImage = append(einkImage, colorSpace[clearIndex].Code)
+		}
+	}
+
+	return packBytesIntoNibbles(einkImage)
+}
+
 func packBytesIntoNibbles(input []byte) []byte {
 	// input length must divisible by 2
 

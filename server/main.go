@@ -68,6 +68,22 @@ func calibrationImage(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func clearImage(w http.ResponseWriter, r *http.Request) {
+	var imageProps ImageProperties
+	err := json.NewDecoder(r.Body).Decode(&imageProps)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	data := GenerateClearImage(imageProps.Width, imageProps.Height, imageProps.ColorSpace)
+
+	fmt.Printf("Bytes to send: %+v\n", len(data))
+
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Write(data)
+}
+
 func fetchImage(w http.ResponseWriter, r *http.Request) {
 	var imageProps ImageProperties
 	err := json.NewDecoder(r.Body).Decode(&imageProps)
@@ -130,6 +146,7 @@ func main() {
 		// r.Use(basicAuth)
 		r.Post("/fetchImage", fetchImage)
 		r.Post("/calibrationImage", calibrationImage)
+		r.Post("/clearImage", clearImage)
 	})
 
 	fmt.Println("Started server")
