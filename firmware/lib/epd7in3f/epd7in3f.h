@@ -53,7 +53,7 @@ Color Index
 class Epd : EpdIf
 {
 public:
-    Epd(UWORD width, UWORD height, int busyPin, int restPin, int dcPin, int csPin);
+    Epd(int reset_pin, int dc_pin, int cs_pin, int busy_pin, int width, int height);
     ~Epd();
     int Init(void);
     void EPD_7IN3F_BusyHigh(void);
@@ -67,10 +67,6 @@ public:
     void SendData(unsigned char data);
     void Sleep(void);
     void Clear(UBYTE color);
-
-private:
-    unsigned long width;
-    unsigned long height;
 };
 
 #endif /* EPD5IN83B_HD_H */

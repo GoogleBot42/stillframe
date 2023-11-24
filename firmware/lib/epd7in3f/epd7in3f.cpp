@@ -34,14 +34,10 @@
 #include <stdlib.h>
 #include "epd7in3f.h"
 
-Epd::~Epd(){};
+Epd::Epd(int reset_pin, int dc_pin, int cs_pin, int busy_pin, int width, int height)
+    : EpdIf(reset_pin, dc_pin, cs_pin, busy_pin, width, height) {}
 
-Epd::Epd(UWORD width, UWORD height, int busyPin, int restPin, int dcPin, int csPin)
-    : EpdIf(busyPin, restPin, dcPin, csPin)
-{
-    width = width;
-    height = height;
-};
+Epd::~Epd(){};
 
 /******************************************************************************
 function :  Initialize the e-Paper register

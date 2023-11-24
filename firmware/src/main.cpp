@@ -5,24 +5,26 @@
 #include "eink.h"
 #include "network.h"
 
-void fetchAndDrawImage();
+void fetchAndDrawImage(const char *url);
 void hibernate_and_restart();
 
 const char *ssid = WIFI_SSID;
 const char *password = WIFI_PASSWORD;
 
-#define HIBERNATE_TIME_SEC 120 // hibernate time in seconds
+#define HIBERNATE_TIME_SEC 5 // hibernate time in seconds
+// #define HIBERNATE_TIME_SEC 120 // hibernate time in seconds
 
-const char *serverName = "http://192.168.3.133:8080/fetchImage";
+const char *clearImage = "http://192.168.3.192:8080/clearImage";
+const char *fetchImage = "http://192.168.3.192:8080/fetchImage";
+const char *calibrationImage = "http://192.168.3.192:8080/calibrationImage";
 
 void setup()
 {
-  // put your setup code here, to run once:
   Serial.begin(9600);
 
-  initDisplay();
-
   delay(3000);
+
+  initDisplay();
 
   WiFi.begin(ssid, password);
   Serial.println("Connecting");

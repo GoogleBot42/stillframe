@@ -30,15 +30,15 @@
 
 #ifdef EPD7IN3F
 
-EpdIf::EpdIf(int busyPin, int restPin, int dcPin, int csPin)
-{
-    reset_pin = restPin;
-    dc_pin = dcPin;
-    cs_pin = csPin;
-    busy_pin = busyPin;
-};
+EpdIf::EpdIf(int reset_pin, int dc_pin, int cs_pin, int busy_pin, int width, int height)
+    : reset_pin(reset_pin),
+      dc_pin(dc_pin),
+      cs_pin(cs_pin),
+      busy_pin(busy_pin),
+      width(width),
+      height(height) {}
 
-EpdIf::~EpdIf(){};
+EpdIf::~EpdIf() {}
 
 void EpdIf::DigitalWrite(int pin, int value)
 {

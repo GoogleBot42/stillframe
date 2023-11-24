@@ -28,25 +28,35 @@
 #ifndef EPDIF_H
 #define EPDIF_H
 
+// #define DISPLAY_WIDTH 800
+// #define DISPLAY_HEIGHT 480
+
+// #define BUSY_PIN 26
+// #define RST_PIN 27
+// #define DC_PIN 15
+// #define CS_PIN 14
+
 #include <Arduino.h>
 
 class EpdIf
 {
 public:
-    EpdIf(int busyPin, int restPin, int dcPin, int csPin);
-    ~EpdIf(void);
+    EpdIf(int reset_pin, int dc_pin, int cs_pin, int busy_pin, int width, int height);
+    ~EpdIf();
 
-    int IfInit(void);
+    int IfInit();
     void DigitalWrite(int pin, int value);
     int DigitalRead(int pin);
     void DelayMs(unsigned int delaytime);
     void SpiTransfer(unsigned char data);
 
 protected:
-    unsigned int reset_pin;
-    unsigned int dc_pin;
-    unsigned int cs_pin;
-    unsigned int busy_pin;
+    int reset_pin;
+    int dc_pin;
+    int cs_pin;
+    int busy_pin;
+    int width;
+    int height;
 };
 
 #endif

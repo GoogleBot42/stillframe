@@ -47,7 +47,7 @@ const char *einkDisplayProperties = R"json(
 }
 )json";
 
-Epd epd(DISPLAY_WIDTH, DISPLAY_HEIGHT, BUSY_PIN, RST_PIN, DC_PIN, CS_PIN);
+Epd epd(RST_PIN, DC_PIN, CS_PIN, BUSY_PIN, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
 void initDisplay()
 {
@@ -60,8 +60,6 @@ void initDisplay()
 
 void drawImage(uint8_t *image)
 {
-  Serial.println("Wake up display");
-  epd.Reset();
   Serial.println("Draw image");
   epd.EPD_7IN3F_Display(image);
   Serial.println("Put display to sleep");
