@@ -28,9 +28,10 @@ void setup()
 
   WiFi.begin(ssid, password);
   Serial.println("Connecting");
-  while(WiFi.status() != WL_CONNECTED) {
-      delay(1000);
-      Serial.print(".");
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(1000);
+    Serial.print(".");
   }
   Serial.println("");
   Serial.print("Connected! IP Address: ");
@@ -43,7 +44,8 @@ void setup()
   hibernate_and_restart();
 }
 
-void fetchAndDrawImage(const char* url) {
+void fetchAndDrawImage(const char *url)
+{
   HTTPClient http;
 
   http.begin(url);
@@ -52,26 +54,30 @@ void fetchAndDrawImage(const char* url) {
   http.addHeader("Content-Type", "application/json");
   int httpCode = http.POST(einkDisplayProperties);
 
-  if (httpCode > 0) {
-      int length = http.getSize();
+  if (httpCode > 0)
+  {
+    int length = http.getSize();
 
-      Serial.print("Length of payload: ");
-      Serial.println(length);
+    Serial.print("Length of payload: ");
+    Serial.println(length);
 
-      uint8_t* payload = new uint8_t[length];
-      http.getStream().readBytes(payload, length);
+    uint8_t *payload = new uint8_t[length];
+    http.getStream().readBytes(payload, length);
 
-      drawImage(payload);
+    drawImage(payload);
 
-      delete[] payload;
-  } else {
+    delete[] payload;
+  }
+  else
+  {
     Serial.println("Error on HTTP request");
   }
 
   http.end();
 }
 
-void hibernate_and_restart() {
+void hibernate_and_restart()
+{
   // Go to sleep and wake up later
   Serial.print("Begining hibernation. Waking up in ");
   Serial.print(HIBERNATE_TIME_SEC);
