@@ -13,11 +13,11 @@ in
         Directory of images that the server will serve
       '';
     };
-    imgDirGroup = lib.mkOption {
+    group = lib.mkOption {
       type = lib.types.str;
+      default = "picture-frame-server";
       description = ''
-        The group the server will run as a member of.
-        So the server can have read access to `imgDir`.
+        The group the server should run as
       '';
     };
     port = lib.mkOption {
@@ -31,16 +31,20 @@ in
 
   config = lib.mkIf cfg.enable {
     nixpkgs.overlays = [ overlay ];
+    users.users.${cfg.user} = {
+      isSystemUser = true;
+      group = cfg.group;
+    };
+    users.groups.${cfg.group} = { };
     systemd.services.picture-frame-server = {
       enable = true;
       after = [ "network.target" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         ExecStart = "${pkgs.picture-frame.server}/bin/server ${toString cfg.port} ${cfg.imgDir}";
-        DynamicUser = true;
-        PrivateTmp = true;
-        User = "picture-frame-server";
-        SupplementaryGroups = [ cfg.imgDirGroup ];
+        User = cfg.user;
+        Group = cfg.group;
+        Restart = "on-failure";
       };
     };
   };
