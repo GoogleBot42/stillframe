@@ -13,6 +13,13 @@ in
         Directory of images that the server will serve
       '';
     };
+    user = lib.mkOption {
+      type = lib.types.str;
+      default = "picture-frame-server";
+      description = ''
+        The user the server should run as
+      '';
+    };
     group = lib.mkOption {
       type = lib.types.str;
       default = "picture-frame-server";
