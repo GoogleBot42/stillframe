@@ -1,7 +1,7 @@
 #pragma once
 
 // Dependency-free unit test harness for the host-testable parts of the
-// DynamicFrame display components. Write tests as:
+// Stillframe display components. Write tests as:
 //
 //   TEST(my_test) {
 //     CHECK(1 + 1 == 2);

@@ -60,7 +60,7 @@ let
   };
 
   server = buildGoModule rec {
-    pname = "dynamic-frame-server";
+    pname = "stillframe-server";
     version = "0.0.1";
 
     src = ./.;

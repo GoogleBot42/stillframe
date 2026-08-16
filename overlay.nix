@@ -1,4 +1,4 @@
-# Package overlay for the DynamicFrame server.
+# Package overlay for the Stillframe server.
 #
 # This file is the single source of truth: flake.nix sets
 # `overlays.default = import ./overlay.nix`, so every package, check and the
@@ -12,10 +12,12 @@ let
   };
 in
 {
-  # The project answers to both names: this overlay has always exported
-  # `dynamic-frame`, while flake.nix's inline overlay and server/service.nix
-  # use `picture-frame`. Export the same package set under both attributes so
-  # neither this repo nor any unknown downstream consumer breaks.
-  dynamic-frame = packages;
-  picture-frame = packages;
+  # `stillframe` is the current name and what this repo (flake.nix,
+  # server/service.nix) uses. The project has also answered to `dynamic-frame`
+  # (this overlay's original attribute) and `picture-frame` (the repository
+  # name, used by flake.nix's old inline overlay); unknown downstream flakes may
+  # still refer to either, so keep both as aliases of the same package set.
+  stillframe = packages;
+  picture-frame = packages; # deprecated alias
+  dynamic-frame = packages; # deprecated alias
 }

@@ -1,4 +1,4 @@
-module git.neet.dev/zuckerberg/dynamic-frame/server
+module git.neet.dev/zuckerberg/picture-frame/server
 
 go 1.19
 

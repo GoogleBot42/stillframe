@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-DynamicFrame is an e-ink picture frame system with two components:
+Stillframe is an e-ink picture frame system with two components:
 - **Server** (Go) — HTTP server that processes images and converts them for e-ink displays
 - **ESPHome** (YAML + C++) — ESPHome-based firmware with HA integration, OTA, and deep sleep
 
@@ -62,7 +62,7 @@ Key files:
 - `image.go` — Image decoding (PNG/JPEG/GIF), RGBA conversion, gamma correction
 - `einkimage.go` — Color space mapping, CIEDE2000 dithering, nibble packing
 - `bestcrop.go` — Smart crop via Python subprocess (`smartcrop-cli`)
-- `service.nix` — NixOS systemd service module (configurable port, imgDir, user/group)
+- `service.nix` — NixOS systemd service module `services.stillframe-server` (configurable port, imgDir, user/group)
 - `service-test.nix` — NixOS VM test that verifies the service starts
 
 ### ESPHome Firmware (`esphome/`)
@@ -72,7 +72,7 @@ Key files:
 **Factory / adoptable split**
 
 - `esphome/<variant>.yaml` — the *adoptable* config: board-specific hardware + `common.yaml` as a package. Pulls the display drivers from the published repo (`external_components: - source: ${components_source}`, default `github://GoogleBot42/picture-frame@main`; ESPHome auto-detects the `esphome/components` folder) so an adopted dashboard can build it anywhere.
-- `esphome/factory/<variant>.yaml` — the *factory* build CI compiles and publishes. Includes the adoptable yaml as a package and adds only what a pre-built binary needs: `esphome.project` (name `googlebot42.picture-frame`, version `${firmware_version}`, defaulting to `dev` and overridden by CI with the release tag), `name_add_mac_suffix`, `dashboard_import` (`github://GoogleBot42/picture-frame/esphome/<variant>.yaml@main`, `import_full_config: false`), `ota: platform: http_request`, and `update: platform: http_request` pointing at `https://googlebot42.github.io/picture-frame/firmware/<variant>/manifest.json` (combined esp-web-tools + OTA manifest). CI also overrides `components_source=../components` so a release compiles the drivers from the tagged checkout, not from `@main`.
+- `esphome/factory/<variant>.yaml` — the *factory* build CI compiles and publishes. Includes the adoptable yaml as a package and adds only what a pre-built binary needs: `esphome.project` (name `googlebot42.stillframe`, version `${firmware_version}`, defaulting to `dev` and overridden by CI with the release tag), `name_add_mac_suffix`, `dashboard_import` (`github://GoogleBot42/picture-frame/esphome/<variant>.yaml@main`, `import_full_config: false`), `ota: platform: http_request`, and `update: platform: http_request` pointing at `https://googlebot42.github.io/picture-frame/firmware/<variant>/manifest.json` (combined esp-web-tools + OTA manifest). CI also overrides `components_source=../components` so a release compiles the drivers from the tagged checkout, not from `@main`.
 
   The update entity sets `update_interval: never`, because `HttpRequestUpdate::setup()` schedules an initial check ~10 s after boot whenever the interval is *not* `never` — which would mean hitting GitHub Pages on every single wake, for an update a frame that is about to sleep could never install. The only automatic check is the `component.update: firmware_update` in the factory `on_boot` (priority -200), gated behind an untimed `wait_until` on the "Prevent Deep Sleep" switch: it fires when the frame is deliberately held awake (including when the switch is flipped on from HA after boot) and otherwise never completes, dying with the chip at deep sleep. Home Assistant's own "check for update" command still works — it calls the entity directly, not the poller.
 - `esphome/dev.yaml` — local-dev override that swaps `components_source` to the local `components/` directory. The source is a substitution, not an extra `external_components` entry, because ESPHome clones *every* entry in that list.
@@ -112,7 +112,7 @@ HA entities: "Prevent Deep Sleep" switch, "Sleep Duration" number, "Fetch Image 
 ### Nix Integration
 
 - `flake.nix` — Defines packages (server, smartcrop), dev shell, NixOS module, and checks. Inputs track `nixos-unstable`; `nix develop` therefore ships a current Go, Python 3, and ESPHome
-- `overlay.nix` — The package overlay, and the single source of truth for it: `flake.nix` sets `overlays.default = import ./overlay.nix`, so `nix flake check` exercises the same file downstream flakes import. It exports the same package set under two attributes, `pkgs.picture-frame` (used by this repo and `server/service.nix`) and `pkgs.dynamic-frame` (the older name, kept for downstream consumers)
+- `overlay.nix` — The package overlay, and the single source of truth for it: `flake.nix` sets `overlays.default = import ./overlay.nix`, so `nix flake check` exercises the same file downstream flakes import. It exports the same package set under three attributes: `pkgs.stillframe` (the current name, used by this repo and `server/service.nix`) plus `pkgs.picture-frame` and `pkgs.dynamic-frame` (older names, kept as aliases for downstream consumers)
 - `server/default.nix` — Builds smartcrop Python package, Go server, and wraps the binary so smartcrop-cli is in PATH. The wrapper must use `--prefix PATH :` — `--set PATH "...:$PATH"` expands `$PATH` at build time and drags the whole stdenv toolchain (~870 MiB) into the runtime closure of a network-facing daemon
 
 Checks (`nix flake check`, and `.github/workflows/checks.yml` on the GitHub mirror):

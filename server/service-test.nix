@@ -2,7 +2,7 @@
 
 with import (nixpkgs + "/nixos/lib/testing-python.nix") { inherit system; };
 simpleTest {
-  name = "dynamic-frame-server";
+  name = "stillframe-server";
   nodes.machine = { config, pkgs, ... }: {
     imports = [ service ];
 
@@ -11,7 +11,7 @@ simpleTest {
     # The VM has no network, so curl has to be part of its closure.
     environment.systemPackages = [ pkgs.curl ];
 
-    services.picture-frame-server = {
+    services.stillframe-server = {
       enable = true;
       # Deliberately a directory the server does not control: /tmp on a NixOS
       # machine also contains systemd-private-* subdirectories, so this is the
@@ -44,7 +44,7 @@ simpleTest {
 
       machine.start()
       machine.wait_for_unit("multi-user.target")
-      machine.wait_for_unit("picture-frame-server")
+      machine.wait_for_unit("stillframe-server")
       machine.wait_for_open_port(PORT)
 
       machine.succeed(
@@ -65,7 +65,7 @@ simpleTest {
       # would otherwise paper over a crash.
       with subtest("fetchImage cannot kill the server"):
           pid_before = machine.succeed(
-              "systemctl show -p MainPID --value picture-frame-server"
+              "systemctl show -p MainPID --value stillframe-server"
           ).strip()
           machine.execute(
               "curl -sS --max-time 30 -o /dev/null "
@@ -73,12 +73,12 @@ simpleTest {
               "--data-binary @/tmp/request.json "
               "http://127.0.0.1:{}/fetchImage".format(PORT)
           )
-          machine.succeed("systemctl is-active picture-frame-server")
+          machine.succeed("systemctl is-active stillframe-server")
           pid_after = machine.succeed(
-              "systemctl show -p MainPID --value picture-frame-server"
+              "systemctl show -p MainPID --value stillframe-server"
           ).strip()
           assert pid_before == pid_after, (
-              "picture-frame-server restarted during /fetchImage "
+              "stillframe-server restarted during /fetchImage "
               "(pid {} -> {}): the request crashed the daemon".format(
                   pid_before, pid_after
               )

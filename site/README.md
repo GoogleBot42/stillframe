@@ -1,7 +1,7 @@
 # Public firmware distribution
 
 `site/` is the static install page published to GitHub Pages, alongside the
-compiled factory firmware. Together they let anyone flash a DynamicFrame from
+compiled factory firmware. Together they let anyone flash a Stillframe from
 a browser and then receive updates over the air, with no toolchain.
 
 **Forge topology:** the source of truth is Gitea
@@ -91,7 +91,7 @@ substitutions:
 
 esphome:
   project:
-    name: googlebot42.picture-frame
+    name: googlebot42.stillframe
     version: ${firmware_version}
 ```
 

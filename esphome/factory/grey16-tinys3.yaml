@@ -12,7 +12,7 @@ substitutions:
   firmware_version: dev
 esphome:
   project:
-    name: googlebot42.picture-frame
+    name: googlebot42.stillframe
     version: ${firmware_version}
   # Public builds are flashed to many identical devices; keep hostnames unique
   # until the device is adopted (adoption bakes the resolved name into the

@@ -1,4 +1,4 @@
-# Shared config for all DynamicFrame devices.
+# Shared config for all Stillframe devices.
 #
 # This package is secretless on purpose: every user flashes the exact same
 # public build and all personal configuration lives in NVS at runtime.

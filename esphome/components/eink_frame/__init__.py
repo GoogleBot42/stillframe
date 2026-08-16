@@ -1,4 +1,4 @@
-"""Shared base for the DynamicFrame e-paper display drivers.
+"""Shared base for the Stillframe e-paper display drivers.
 
 This component has no configuration of its own: the panel drivers
 (``epd7in3f``, ``it8951_spi``, ``el133uf1``) pull it in with ``AUTO_LOAD`` so

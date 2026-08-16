@@ -4,7 +4,7 @@ substitutions:
   wake_pin: GPIO25
 
 esphome:
-  name: dynamicframe-color7
+  name: stillframe-color7
 
 esp32:
   board: tinypico

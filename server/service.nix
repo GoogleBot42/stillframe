@@ -2,11 +2,11 @@
 
 { config, pkgs, lib, ... }:
 let
-  cfg = config.services.picture-frame-server;
+  cfg = config.services.stillframe-server;
 in
 {
-  options.services.picture-frame-server = {
-    enable = lib.mkEnableOption "enable picture-frame-server";
+  options.services.stillframe-server = {
+    enable = lib.mkEnableOption "enable stillframe-server";
     imgDir = lib.mkOption {
       type = lib.types.str;
       description = ''
@@ -15,14 +15,14 @@ in
     };
     user = lib.mkOption {
       type = lib.types.str;
-      default = "picture-frame-server";
+      default = "stillframe-server";
       description = ''
         The user the server should run as
       '';
     };
     group = lib.mkOption {
       type = lib.types.str;
-      default = "picture-frame-server";
+      default = "stillframe-server";
       description = ''
         The group the server should run as
       '';
@@ -43,12 +43,12 @@ in
       group = cfg.group;
     };
     users.groups.${cfg.group} = { };
-    systemd.services.picture-frame-server = {
+    systemd.services.stillframe-server = {
       enable = true;
       after = [ "network.target" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
-        ExecStart = "${pkgs.picture-frame.server}/bin/server ${toString cfg.port} ${cfg.imgDir}";
+        ExecStart = "${pkgs.stillframe.server}/bin/server ${toString cfg.port} ${cfg.imgDir}";
         User = cfg.user;
         Group = cfg.group;
         Restart = "on-failure";

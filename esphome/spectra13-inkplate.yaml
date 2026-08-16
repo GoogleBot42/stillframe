@@ -12,7 +12,7 @@ substitutions:
   wake_pin: GPIO18
 
 esphome:
-  name: dynamicframe-spectra13
+  name: stillframe-spectra13
 
 esp32:
   variant: esp32s3

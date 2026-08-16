@@ -13,7 +13,7 @@ substitutions:
   wake_pin: GPIO0
 
 esphome:
-  name: dynamicframe-grey16-s3
+  name: stillframe-grey16-s3
 
 esp32:
   board: um_tinys3

@@ -1,4 +1,4 @@
-# DynamicFrame
+# Stillframe
 
 A battery-friendly e-ink picture frame. An ESP32 wakes up, asks a small Go
 server for a freshly processed photo, streams it straight to the panel, and

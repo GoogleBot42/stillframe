@@ -1,6 +1,6 @@
 #pragma once
 
-// Panel-independent half of a DynamicFrame e-paper display driver.
+// Panel-independent half of a Stillframe e-paper display driver.
 //
 // Every panel driver (epd7in3f, it8951_spi, el133uf1) exposes the same
 // interface to the shared `fetch_and_display` script in esphome/common.yaml:

@@ -1,5 +1,5 @@
 {
-  description = "A simple Go project built with Nix";
+  description = "Stillframe — e-ink picture frame server and ESPHome firmware";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -26,13 +26,13 @@
         inherit (pkgs) lib;
       in
       {
-        packages = with pkgs.picture-frame; {
+        packages = with pkgs.stillframe; {
           inherit server smartcrop;
           default = server;
         };
         devShells.default = pkgs.callPackage ./shell.nix { };
 
-        checks.build = pkgs.picture-frame.server;
+        checks.build = pkgs.stillframe.server;
         checks.service = import ./server/service-test.nix {
           inherit nixpkgs system;
           service = self.nixosModules.service;

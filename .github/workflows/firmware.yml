@@ -1,4 +1,4 @@
-# Build the DynamicFrame factory firmware, publish it as a GitHub Release, and
+# Build the Stillframe factory firmware, publish it as a GitHub Release, and
 # deploy it to GitHub Pages. Fires only on a `vX.Y.Z` release tag.
 #
 # WHERE THIS RUNS
@@ -166,7 +166,7 @@ jobs:
       #       firmware_version: dev          # local builds
       #     esphome:
       #       project:
-      #         name: googlebot42.picture-frame
+      #         name: googlebot42.stillframe
       #         version: ${firmware_version}
       #
       # The value is the release tag with its leading `v` stripped: tag `v1.3.0`
@@ -196,7 +196,7 @@ jobs:
           # Emit a full esp-web-tools manifest, not just a `builds[]` fragment,
           # because each variant gets its own directory and its own manifest.
           complete-manifest: true
-          release-summary: "DynamicFrame ${{ matrix.variant }} firmware ${{ env.FIRMWARE_VERSION }}"
+          release-summary: "Stillframe ${{ matrix.variant }} firmware ${{ env.FIRMWARE_VERSION }}"
           release-url: ${{ env.RELEASE_URL }}
           # `components_source` builds the custom display drivers from THIS
           # checkout instead of `github://GoogleBot42/picture-frame@main` (the
@@ -304,7 +304,7 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           # Release assets live in one flat namespace. The `.bin` names already
-          # embed the device name (dynamicframe-color7, …) so they are unique;
+          # embed the device name (stillframe-color7, …) so they are unique;
           # manifest.json is not, hence the variant prefix. Both consumers
           # resolve the manifest's bare `path` values relative to the manifest
           # URL, so the rename keeps the release assets self-consistent too.
