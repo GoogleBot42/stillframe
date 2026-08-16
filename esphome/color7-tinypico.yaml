@@ -1,0 +1,33 @@
+# 7-color Waveshare EPD7IN3F (800x480) on TinyPico (ESP32)
+
+substitutions:
+  wake_pin: GPIO25
+
+esphome:
+  name: dynamicframe-color7
+
+esp32:
+  board: tinypico
+  framework:
+    type: arduino
+
+psram:
+
+packages:
+  common: !include common.yaml
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+
+epd7in3f:
+  id: epaper_display
+  cs_pin: GPIO14
+  dc_pin: GPIO15
+  reset_pin: GPIO27
+  busy_pin: GPIO26

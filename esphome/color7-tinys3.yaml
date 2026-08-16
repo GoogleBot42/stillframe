@@ -1,0 +1,37 @@
+# 7-color Waveshare EPD7IN3F (800x480) on TinyS3 (ESP32-S3)
+
+substitutions:
+  # GPIO25 does not exist on the ESP32-S3; use the boot button (GPIO0) as the
+  # wake button, or change to another RTC-capable pin (GPIO0-21) with a button.
+  wake_pin: GPIO0
+
+esphome:
+  name: dynamicframe-color7-s3
+
+esp32:
+  board: um_tinys3
+  framework:
+    type: arduino
+
+# TinyS3 has 8MB QSPI (quad) PSRAM
+psram:
+  mode: quad
+
+packages:
+  common: !include common.yaml
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+spi:
+  clk_pin: GPIO36
+  mosi_pin: GPIO35
+
+epd7in3f:
+  id: epaper_display
+  cs_pin: GPIO34
+  dc_pin: GPIO38
+  reset_pin: GPIO33
+  busy_pin: GPIO37

@@ -1,0 +1,175 @@
+# Shared config for all DynamicFrame devices.
+#
+# Each device yaml provides:
+#   - esphome: name
+#   - esp32: board/framework
+#   - spi: + a display component with id `epaper_display` implementing:
+#       get_image_request_body(), get_image_byte_count(),
+#       begin_image(), write_image_data(), finish_image(), wake(), sleep()
+#   - substitutions: wake_pin (RTC-capable GPIO with a button to GND)
+
+substitutions:
+  server_fetch_url: !secret server_fetch_url
+  server_auth_header: !secret server_auth_header
+
+esphome:
+  on_boot:
+    - priority: -100.0
+      then:
+        - if:
+            condition:
+              binary_sensor.is_on: wake_button
+            then:
+              - logger.log: "Wake button pressed — staying awake for OTA"
+              - deep_sleep.prevent: deep_sleep_control
+            else:
+              - if:
+                  condition:
+                    switch.is_on: prevent_deep_sleep
+                  then:
+                    - logger.log: "Prevent Deep Sleep switch is ON — staying awake"
+                  else:
+                    - script.execute: fetch_and_display
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  manual_ip:
+    static_ip: !secret wifi_ip
+    gateway: !secret wifi_gateway
+    subnet: !secret wifi_subnet
+    dns1: !secret wifi_dns
+  ap:
+    ssid: "DynamicFrame Fallback"
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: INFO
+
+http_request:
+  id: http_client
+  timeout: 40s
+
+deep_sleep:
+  id: deep_sleep_control
+  sleep_duration: 120s
+  wakeup_pin:
+    number: ${wake_pin}
+    inverted: true
+    mode: INPUT_PULLUP
+    allow_other_uses: true
+  wakeup_pin_mode: KEEP_AWAKE
+
+switch:
+  - platform: template
+    name: "Prevent Deep Sleep"
+    id: prevent_deep_sleep
+    optimistic: true
+    # Persist across deep sleep cycles so the switch can actually hold the
+    # device awake on its next wake-up (an OTA window).
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - deep_sleep.prevent: deep_sleep_control
+    on_turn_off:
+      - deep_sleep.allow: deep_sleep_control
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: ${wake_pin}
+      inverted: true
+      mode: INPUT_PULLUP
+      allow_other_uses: true
+    name: "Wake Button"
+    id: wake_button
+
+button:
+  - platform: template
+    name: "Fetch Image Now"
+    on_press:
+      - script.execute: fetch_and_display
+
+script:
+  - id: fetch_and_display
+    then:
+      - wait_until:
+          condition: wifi.connected
+          timeout: 60s
+      - if:
+          condition: wifi.connected
+          then:
+            - lambda: id(epaper_display).wake();
+            - logger.log: "Fetching image from server..."
+            # Stream the HTTP response straight to the display in small
+            # chunks instead of buffering the whole image in RAM.
+            - lambda: |-
+                static const char *FTAG = "frame";
+                std::vector<http_request::Header> headers;
+                headers.push_back({"Content-Type", "application/json"});
+                headers.push_back({"Authorization", "${server_auth_header}"});
+                std::string body = id(epaper_display).get_image_request_body();
+                auto container = id(http_client)->post("${server_fetch_url}", body, headers);
+                if (container == nullptr) {
+                  ESP_LOGE(FTAG, "HTTP request failed");
+                  return;
+                }
+                if (container->status_code != 200) {
+                  ESP_LOGE(FTAG, "HTTP error %d", container->status_code);
+                  container->end();
+                  return;
+                }
+                size_t expected = id(epaper_display).get_image_byte_count();
+                if (container->content_length > 0 && container->content_length != expected) {
+                  ESP_LOGW(FTAG, "Server sent %u bytes but display expects %u",
+                           (unsigned) container->content_length, (unsigned) expected);
+                }
+                ESP_LOGI(FTAG, "Streaming %u bytes to display...", (unsigned) expected);
+                id(epaper_display).begin_image();
+                std::vector<uint8_t> buf(4096);
+                uint32_t last_data = millis();
+                bool complete = false;
+                while (true) {
+                  int n = container->read(buf.data(), buf.size());
+                  App.feed_wdt();
+                  yield();
+                  auto res = http_request::http_read_loop_result(
+                      n, last_data, 30000, container->is_read_complete());
+                  if (res == http_request::HttpReadLoopResult::DATA) {
+                    id(epaper_display).write_image_data(buf.data(), n);
+                    continue;
+                  }
+                  if (res == http_request::HttpReadLoopResult::RETRY)
+                    continue;
+                  complete = (res == http_request::HttpReadLoopResult::COMPLETE);
+                  break;
+                }
+                size_t received = container->get_bytes_read();
+                container->end();
+                bool ok = complete && received >= expected;
+                if (!ok) {
+                  ESP_LOGE(FTAG, "Download incomplete: %u/%u bytes",
+                           (unsigned) received, (unsigned) expected);
+                }
+                id(epaper_display).finish_image(ok);
+            - lambda: id(epaper_display).sleep();
+          else:
+            - logger.log: "WiFi did not connect — going back to sleep"
+      - if:
+          condition:
+            switch.is_on: prevent_deep_sleep
+          then:
+            - logger.log: "Prevent Deep Sleep is ON — staying awake"
+          else:
+            - logger.log: "Entering deep sleep..."
+            - deep_sleep.enter: deep_sleep_control
