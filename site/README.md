@@ -189,7 +189,15 @@ a push mirror, and Actions run exclusively on the GitHub side.
 4. **Enable Pages**: GitHub → *Settings* → *Pages* → *Build and deployment* →
    *Source*: **GitHub Actions**. Do **not** pick "Deploy from a branch"; the
    workflow uploads the artifact directly.
-5. **Cut the first release**: tag `v1.0.0` on Gitea and push it (see
+5. **Allow tag deployments to Pages**: GitHub → *Settings* → *Environments* →
+   *github-pages* → *Deployment branches and tags* → add a **tag** rule for
+   `v*`. GitHub auto-creates this environment restricted to the `main` branch,
+   but this pipeline deploys from tags — without the rule the deploy job is
+   rejected by environment protection before it runs a single step (every build
+   green, `Deploy to GitHub Pages` failed with no steps executed). After adding
+   the rule, *Re-run failed jobs* on the run recovers it; nothing needs
+   rebuilding.
+6. **Cut the first release**: tag `v1.0.0` on Gitea and push it (see
    [Cutting a release](#cutting-a-release)). The first run creates the
    `github-pages` environment and the deployment; afterwards
    `https://googlebot42.github.io/stillframe/` is live.
