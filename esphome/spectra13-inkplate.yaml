@@ -30,10 +30,11 @@ psram:
 packages:
   common: !include common.yaml
 
-external_components:
-  - source:
-      type: local
-      path: components
+# The Inkplate 13 Spectra's USB-C port goes through a CH340C USB-UART bridge
+# wired to UART0, not to the ESP32-S3's native USB — so override the S3 default
+# (USB_SERIAL_JTAG) or nothing (logs, Improv provisioning) reaches the port.
+logger:
+  hardware_uart: UART0
 
 spi:
   clk_pin: GPIO38

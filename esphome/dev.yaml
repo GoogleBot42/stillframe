@@ -1,0 +1,24 @@
+# Local development build: same as the adoptable configs, but the custom
+# display components are taken from ./components instead of the published repo.
+#
+#   nix shell nixpkgs#esphome --command esphome run dev.yaml
+#
+# Change the include below to the variant you are working on. The same override
+# works without editing this file by passing the substitution on the command
+# line, which is usually more convenient:
+#
+#   nix shell nixpkgs#esphome --command esphome -s components_source components \
+#       run color7-tinys3.yaml
+#
+# `components_source` must be *replaced*, not appended to: ESPHome clones every
+# entry of `external_components:` (a second local entry would not stop it from
+# fetching the remote one), so the source is a substitution rather than an extra
+# list item. Substitutions in this file override the ones in the package.
+# Keep this file in esphome/ — the local path is resolved relative to the
+# directory of the config file being built.
+
+substitutions:
+  components_source: components
+
+packages:
+  device: !include color7-tinypico.yaml

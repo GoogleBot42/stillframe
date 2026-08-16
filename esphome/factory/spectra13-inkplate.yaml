@@ -1,0 +1,54 @@
+# Factory (public) firmware for the 13.3" Spectra 6 Inkplate frame.
+#
+# This is what CI builds and publishes; end users never edit it. It is the
+# adoptable config plus the pieces that only make sense for a pre-built binary:
+#   - dashboard_import so the ESPHome dashboard can adopt the device
+#   - ota/update over http_request so the published manifest can update it
+# CI passes `firmware_version=1.<run_number>`; the manifest version and the
+# device's project version must match exactly for the update entity to work.
+
+substitutions:
+  firmware_version: dev
+esphome:
+  project:
+    name: googlebot42.picture-frame
+    version: ${firmware_version}
+  # Public builds are flashed to many identical devices; keep hostnames unique
+  # until the device is adopted (adoption bakes the resolved name into the
+  # user's config).
+  name_add_mac_suffix: true
+  on_boot:
+    # Only worth checking for firmware updates when we are staying awake long
+    # enough to install one (wake button held or "Prevent Deep Sleep" on).
+    - priority: -200.0
+      then:
+        - if:
+            condition:
+              or:
+                - switch.is_on: prevent_deep_sleep
+                - binary_sensor.is_on: wake_button
+            then:
+              - wait_until:
+                  condition: wifi.connected
+                  timeout: 60s
+              - if:
+                  condition: wifi.connected
+                  then:
+                    - logger.log: "Checking for firmware updates..."
+                    - component.update: firmware_update
+
+packages:
+  device: !include ../spectra13-inkplate.yaml
+
+dashboard_import:
+  package_import_url: github://GoogleBot42/picture-frame/esphome/spectra13-inkplate.yaml@main
+  import_full_config: false
+
+ota:
+  - platform: http_request
+
+update:
+  - platform: http_request
+    name: "Firmware"
+    id: firmware_update
+    source: https://googlebot42.github.io/picture-frame/firmware/spectra13-inkplate/manifest.json

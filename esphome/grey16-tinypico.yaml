@@ -16,11 +16,6 @@ psram:
 packages:
   common: !include common.yaml
 
-external_components:
-  - source:
-      type: local
-      path: components
-
 # Matches the legacy firmware wiring: SPI.begin(SCK=18, MISO=23, MOSI=19)
 spi:
   clk_pin: GPIO18

@@ -20,10 +20,11 @@ psram:
 packages:
   common: !include common.yaml
 
-external_components:
-  - source:
-      type: local
-      path: components
+# TinyS3 has no USB-UART bridge — its USB-C port is the ESP32-S3's native USB.
+# improv_serial does not support USB_CDC on the S3, so log (and provision) over
+# the USB Serial/JTAG peripheral.
+logger:
+  hardware_uart: USB_SERIAL_JTAG
 
 spi:
   clk_pin: GPIO36

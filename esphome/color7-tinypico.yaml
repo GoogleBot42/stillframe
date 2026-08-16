@@ -16,11 +16,6 @@ psram:
 packages:
   common: !include common.yaml
 
-external_components:
-  - source:
-      type: local
-      path: components
-
 spi:
   clk_pin: GPIO18
   mosi_pin: GPIO23

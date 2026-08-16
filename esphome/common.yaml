@@ -1,18 +1,36 @@
 # Shared config for all DynamicFrame devices.
 #
+# This package is secretless on purpose: every user flashes the exact same
+# public build and all personal configuration lives in NVS at runtime.
+#   - WiFi credentials: provisioned over USB with Improv Serial (ESP Web Tools)
+#   - API encryption key: pushed by Home Assistant when the device is adopted
+#   - Server URL / auth header: the "Server URL" / "Server Auth Header" text
+#     entities (restored from flash across deep sleep cycles)
+#
 # Each device yaml provides:
 #   - esphome: name
 #   - esp32: board/framework
+#   - logger: hardware_uart, when the board's USB port is not plain UART0
 #   - spi: + a display component with id `epaper_display` implementing:
 #       get_image_request_body(), get_image_byte_count(),
 #       begin_image(), write_image_data(), finish_image(), wake(), sleep()
 #   - substitutions: wake_pin (RTC-capable GPIO with a button to GND)
 
 substitutions:
-  server_fetch_url: !secret server_fetch_url
-  server_auth_header: !secret server_auth_header
+  # Where the custom display components come from. Defaults to the published
+  # repo so an adopted config builds anywhere; esphome/dev.yaml overrides this
+  # with the local `components` directory for driver development.
+  components_source: github://GoogleBot42/picture-frame@main
+  # Initial value of the "Server URL" text entity (first boot / after reset).
+  default_server_url: http://homeassistant.local:8080
+  sleep_duration: 120s
 
 esphome:
+  # NOTE: `project:` is deliberately NOT set here. Only the factory builds
+  # (esphome/factory/*.yaml) stamp a project name/version, because that version
+  # is what the http_request update component compares against the published
+  # manifest. Adopted configs are built by the user's dashboard and simply have
+  # no project version.
   on_boot:
     - priority: -100.0
       then:
@@ -31,28 +49,40 @@ esphome:
                   else:
                     - script.execute: fetch_and_display
 
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-  fast_connect: true
-  manual_ip:
-    static_ip: !secret wifi_ip
-    gateway: !secret wifi_gateway
-    subnet: !secret wifi_subnet
-    dns1: !secret wifi_dns
-  ap:
-    ssid: "DynamicFrame Fallback"
-    password: !secret fallback_ap_password
+external_components:
+  - source: ${components_source}
 
-captive_portal:
+wifi:
+  # No credentials are compiled in. The device is provisioned over USB with
+  # Improv Serial (https://web.esphome.io or the project's web installer).
+  # There is deliberately no fallback AP / captive portal: re-provisioning is
+  # done over USB, which keeps the build free of any secret.
+  #
+  # reboot_timeout 0: an unprovisioned frame stays awake (see maybe_sleep) and
+  # must not reboot out from under an in-progress Improv session. A provisioned
+  # frame that cannot reach the AP goes back to sleep instead of rebooting.
+  reboot_timeout: 0s
+
+improv_serial:
 
 api:
+  # No encryption key is compiled in. With `encryption:` present but empty,
+  # both plaintext and noise transports are built and Home Assistant pushes a
+  # dynamically generated PSK when the device is adopted; it is then stored in
+  # flash and plaintext is disabled.
   encryption:
-    key: !secret api_encryption_key
+  on_client_connected:
+    - globals.set:
+        id: api_connected_this_boot
+        value: "true"
+    - globals.set:
+        id: has_been_adopted
+        value: "true"
 
 ota:
+  # No password: the ESPHome dashboard must be able to reflash an adopted
+  # device over the factory firmware.
   - platform: esphome
-    password: !secret ota_password
 
 logger:
   level: INFO
@@ -63,13 +93,47 @@ http_request:
 
 deep_sleep:
   id: deep_sleep_control
-  sleep_duration: 120s
+  sleep_duration: ${sleep_duration}
   wakeup_pin:
     number: ${wake_pin}
     inverted: true
     mode: INPUT_PULLUP
     allow_other_uses: true
   wakeup_pin_mode: KEEP_AWAKE
+
+globals:
+  # Set the first time Home Assistant connects and kept across deep sleep, so
+  # the frame stays awake until it has been adopted at least once.
+  - id: has_been_adopted
+    type: bool
+    restore_value: true
+    initial_value: "false"
+  - id: api_connected_this_boot
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+text:
+  - platform: template
+    name: "Server URL"
+    id: server_url
+    icon: mdi:server-network
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: ${default_server_url}
+    max_length: 128
+    mode: text
+  - platform: template
+    name: "Server Auth Header"
+    id: server_auth_header
+    icon: mdi:key
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    max_length: 128
+    mode: text
 
 switch:
   - platform: template
@@ -97,6 +161,7 @@ binary_sensor:
 button:
   - platform: template
     name: "Fetch Image Now"
+    id: fetch_image_now
     on_press:
       - script.execute: fetch_and_display
 
@@ -115,11 +180,22 @@ script:
             # chunks instead of buffering the whole image in RAM.
             - lambda: |-
                 static const char *FTAG = "frame";
+                // Server URL comes from the runtime-configurable text entity.
+                std::string base = id(server_url).state;
+                while (!base.empty() && base.back() == '/')
+                  base.pop_back();
+                if (base.empty()) {
+                  ESP_LOGE(FTAG, "Server URL is not configured");
+                  return;
+                }
+                std::string url = base + "/fetchImage";
                 std::vector<http_request::Header> headers;
                 headers.push_back({"Content-Type", "application/json"});
-                headers.push_back({"Authorization", "${server_auth_header}"});
+                std::string auth = id(server_auth_header).state;
+                if (!auth.empty())
+                  headers.push_back({"Authorization", auth});
                 std::string body = id(epaper_display).get_image_request_body();
-                auto container = id(http_client)->post("${server_fetch_url}", body, headers);
+                auto container = id(http_client)->post(url, body, headers);
                 if (container == nullptr) {
                   ESP_LOGE(FTAG, "HTTP request failed");
                   return;
@@ -165,11 +241,49 @@ script:
             - lambda: id(epaper_display).sleep();
           else:
             - logger.log: "WiFi did not connect — going back to sleep"
+      - script.execute: maybe_sleep
+
+  # Deep sleep guardrails. The frame must stay awake while it still needs a
+  # human: unprovisioned (no WiFi credentials in NVS) or never adopted by Home
+  # Assistant. Once it has been adopted at least once it resumes the normal
+  # wake -> fetch -> sleep cycle even if HA is temporarily unreachable.
+  - id: maybe_sleep
+    then:
       - if:
           condition:
             switch.is_on: prevent_deep_sleep
           then:
             - logger.log: "Prevent Deep Sleep is ON — staying awake"
           else:
-            - logger.log: "Entering deep sleep..."
-            - deep_sleep.enter: deep_sleep_control
+            - if:
+                condition:
+                  binary_sensor.is_on: wake_button
+                then:
+                  - logger.log: "Wake button held — staying awake"
+                else:
+                  - if:
+                      condition:
+                        lambda: return !wifi::global_wifi_component->has_sta();
+                      then:
+                        - logger.log: "No WiFi credentials — staying awake for Improv provisioning"
+                      else:
+                        - if:
+                            condition:
+                              lambda: return !id(has_been_adopted);
+                            then:
+                              - logger.log: "Never adopted by Home Assistant — staying awake"
+                              # Give Home Assistant a chance to discover and
+                              # adopt the device on this first provisioned boot.
+                              - wait_until:
+                                  condition:
+                                    lambda: return id(api_connected_this_boot);
+                                  timeout: 300s
+                              - if:
+                                  condition:
+                                    lambda: return id(has_been_adopted);
+                                  then:
+                                    - logger.log: "Adopted — entering deep sleep..."
+                                    - deep_sleep.enter: deep_sleep_control
+                            else:
+                              - logger.log: "Entering deep sleep..."
+                              - deep_sleep.enter: deep_sleep_control
