@@ -4,8 +4,9 @@
 # adoptable config plus the pieces that only make sense for a pre-built binary:
 #   - dashboard_import so the ESPHome dashboard can adopt the device
 #   - ota/update over http_request so the published manifest can update it
-# CI passes `firmware_version=1.<run_number>`; the manifest version and the
-# device's project version must match exactly for the update entity to work.
+# CI builds this only on a `vX.Y.Z` release tag, passing
+# `firmware_version=<the tag without its leading v>`; the manifest version and
+# the device's project version must match exactly for the update entity to work.
 
 substitutions:
   firmware_version: dev

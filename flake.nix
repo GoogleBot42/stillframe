@@ -2,7 +2,7 @@
   description = "A simple Go project built with Nix";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/master";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -14,7 +14,6 @@
       overlays.default = final: prev: {
         picture-frame = {
           inherit (final.callPackage ./server { }) server smartcrop;
-          firmware = final.callPackage ./firmware { };
         };
       };
     }
@@ -28,10 +27,10 @@
       in
       {
         packages = with pkgs.picture-frame; {
-          inherit server firmware smartcrop;
+          inherit server smartcrop;
           default = server;
         };
-        devShell = pkgs.callPackage ./shell.nix { };
+        devShells.default = pkgs.callPackage ./shell.nix { };
 
         checks.build = pkgs.picture-frame.server;
         checks.service = import ./server/service-test.nix {

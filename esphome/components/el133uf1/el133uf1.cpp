@@ -1,11 +1,10 @@
 #include "el133uf1.h"
+#include "esphome/components/eink_frame/eink_wait.h"
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
-#include <cinttypes>
-#include <cstdio>
 #include <cstring>
 
 namespace esphome {
@@ -89,37 +88,16 @@ void EL133UF1::setup() {
   this->spi_setup();
 }
 
-std::string EL133UF1::get_image_request_body() const {
-  int req_w = (rotation_ == 0) ? NATIVE_WIDTH : NATIVE_HEIGHT;
-  int req_h = (rotation_ == 0) ? NATIVE_HEIGHT : NATIVE_WIDTH;
+const char *EL133UF1::frame_tag_() const { return TAG; }
 
-  char head[128];
-  snprintf(head, sizeof(head), "{\"width\":%d,\"height\":%d,\"flip_vertical\":%s,\"flip_horizonal\":%s,", req_w, req_h,
-           flip_vertical_ ? "true" : "false", flip_horizontal_ ? "true" : "false");
-
-  // Spectra 6 color codes: black, white, yellow, red, blue, green (0x4 unused)
-  std::string body(head);
-  body += "\"color_space\":["
-          "{\"color_code\":0,\"rgb_color\":[0,0,0]},"
-          "{\"color_code\":1,\"rgb_color\":[1,1,1]},"
-          "{\"color_code\":2,\"rgb_color\":[0.982,0.756,0.004]},"
-          "{\"color_code\":3,\"rgb_color\":[0.574,0.066,0.010]},"
-          "{\"color_code\":5,\"rgb_color\":[0.061,0.147,0.336]},"
-          "{\"color_code\":6,\"rgb_color\":[0.059,0.329,0.119]}]}";
-  return body;
-}
-
-void EL133UF1::begin_image() {
-  bytes_written_ = 0;
-  transfer_failed_ = false;
-
+void EL133UF1::on_begin_image_() {
   if (buffer_ == nullptr) {
     RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
     buffer_ = allocator.allocate(get_image_byte_count());
   }
   if (buffer_ == nullptr) {
     ESP_LOGE(TAG, "Failed to allocate %u byte image buffer in PSRAM", (unsigned) get_image_byte_count());
-    transfer_failed_ = true;
+    this->mark_transfer_failed_();
     return;
   }
 
@@ -127,39 +105,19 @@ void EL133UF1::begin_image() {
   power_on_and_init_();
 }
 
-void EL133UF1::write_image_data(const uint8_t *data, size_t len) {
-  if (buffer_ == nullptr)
-    return;
-  size_t expected = get_image_byte_count();
-  if (bytes_written_ + len > expected)
-    len = expected - bytes_written_;
-  if (len == 0)
-    return;
-  memcpy(buffer_ + bytes_written_, data, len);
-  bytes_written_ += len;
-}
+void EL133UF1::on_image_data_(const uint8_t *data, size_t len) { memcpy(buffer_ + this->bytes_written_, data, len); }
 
-void EL133UF1::finish_image(bool ok) {
-  if (transfer_failed_ || !ok || bytes_written_ < get_image_byte_count()) {
-    ESP_LOGE(TAG, "Image transfer failed (%u/%u bytes) — skipping refresh", (unsigned) bytes_written_,
-             (unsigned) get_image_byte_count());
-    power_off_();
-    free_buffer_();
-    return;
+void EL133UF1::on_finish_image_(bool complete) {
+  if (complete) {
+    // Left half to the master controller, right half to the slave.
+    send_image_half_(CHIP_MASTER, 0);
+    send_image_half_(CHIP_SLAVE, NATIVE_WIDTH / 2);
+    wait_busy_(BUSY_TIMEOUT_INIT_MS);
+
+    delay(50);
+    send_command_(REG_DRF, DRF_V, sizeof(DRF_V), CHIP_BOTH);
+    wait_busy_(BUSY_TIMEOUT_REFRESH_MS);
   }
-
-  ESP_LOGI(TAG, "Sending image to panel...");
-
-  // Left half to the master controller, right half to the slave.
-  send_image_half_(CHIP_MASTER, 0);
-  send_image_half_(CHIP_SLAVE, NATIVE_WIDTH / 2);
-  wait_busy_(BUSY_TIMEOUT_INIT_MS);
-
-  ESP_LOGI(TAG, "Refreshing display...");
-  delay(50);
-  send_command_(REG_DRF, DRF_V, sizeof(DRF_V), CHIP_BOTH);
-  wait_busy_(BUSY_TIMEOUT_REFRESH_MS);
-  ESP_LOGI(TAG, "Display refresh complete");
 
   power_off_();
   free_buffer_();
@@ -209,7 +167,7 @@ void EL133UF1::power_on_and_init_() {
 
   send_command_(REG_PON, nullptr, 0, CHIP_BOTH);
   if (!wait_busy_(BUSY_TIMEOUT_INIT_MS)) {
-    transfer_failed_ = true;
+    this->mark_transfer_failed_();
     return;
   }
 
@@ -230,83 +188,54 @@ void EL133UF1::power_off_() {
 
 // BUSYN is LOW while busy. Returns false on timeout.
 bool EL133UF1::wait_busy_(uint32_t timeout_ms) {
-  uint32_t start = millis();
-  while (!busy_pin_->digital_read()) {
-    if (millis() - start > timeout_ms) {
-      ESP_LOGE(TAG, "Timeout (%" PRIu32 " ms) waiting for busy pin", timeout_ms);
-      return false;
-    }
-    App.feed_wdt();
-    delay(1);
-  }
-  return true;
+  return eink_frame::wait_for_pin(busy_pin_, true, timeout_ms, TAG, "busy pin");
+}
+
+// Chip select is active LOW and driven by hand: one SPI bus, two controllers,
+// and a command can address either or both of them.
+void EL133UF1::select_chips_(uint8_t chips, bool selected) {
+  if (chips & CHIP_MASTER)
+    cs_m_pin_->digital_write(!selected);
+  if (chips & CHIP_SLAVE)
+    cs_s_pin_->digital_write(!selected);
 }
 
 // Command byte and parameters are one CS frame; DC stays high (interface mode
 // selected by the BS0/BS1 strapping).
 void EL133UF1::send_command_(uint8_t cmd, const uint8_t *data, size_t len, uint8_t chips) {
-  if (chips & CHIP_MASTER)
-    cs_m_pin_->digital_write(false);
-  if (chips & CHIP_SLAVE)
-    cs_s_pin_->digital_write(false);
+  select_chips_(chips, true);
   this->enable();
   this->transfer_byte(cmd);
   if (len > 0 && data != nullptr)
     this->write_array(data, len);
   this->disable();
-  if (chips & CHIP_MASTER)
-    cs_m_pin_->digital_write(true);
-  if (chips & CHIP_SLAVE)
-    cs_s_pin_->digital_write(true);
-}
-
-uint8_t EL133UF1::get_pixel_(int sx, int sy, int src_width) const {
-  uint8_t b = buffer_[(size_t) sy * (src_width / 2) + sx / 2];
-  return (sx & 1) ? (b & 0x0F) : (b >> 4);
+  select_chips_(chips, false);
 }
 
 // Stream one controller's half of the frame: DTM, then for each of the 1600
 // native rows the 300 bytes covering native columns [px_start, px_start+600).
 void EL133UF1::send_image_half_(uint8_t chips, int px_start) {
-  uint8_t row_buf[NATIVE_WIDTH / 4];
+  uint8_t row_buf[HALF_ROW_BYTES];
 
-  if (chips & CHIP_MASTER)
-    cs_m_pin_->digital_write(false);
-  if (chips & CHIP_SLAVE)
-    cs_s_pin_->digital_write(false);
+  select_chips_(chips, true);
   this->enable();
   this->transfer_byte(REG_DTM);
 
   for (int py = 0; py < NATIVE_HEIGHT; py++) {
     if (rotation_ == 0) {
       // Buffer rows are already native portrait rows.
-      const uint8_t *row = buffer_ + (size_t) py * (NATIVE_WIDTH / 2) + px_start / 2;
-      this->write_array(row, sizeof(row_buf));
+      this->write_array(native_half_row(buffer_, py, px_start), HALF_ROW_BYTES);
     } else {
       // Buffer is landscape (1600x1200); rotate while splitting.
-      for (int i = 0; i < NATIVE_WIDTH / 4; i++) {
-        int px0 = px_start + i * 2;
-        uint8_t hi, lo;
-        if (rotation_ == 90) {
-          hi = get_pixel_(py, NATIVE_WIDTH - 1 - px0, NATIVE_HEIGHT);
-          lo = get_pixel_(py, NATIVE_WIDTH - 2 - px0, NATIVE_HEIGHT);
-        } else {  // 270
-          hi = get_pixel_(NATIVE_HEIGHT - 1 - py, px0, NATIVE_HEIGHT);
-          lo = get_pixel_(NATIVE_HEIGHT - 1 - py, px0 + 1, NATIVE_HEIGHT);
-        }
-        row_buf[i] = (hi << 4) | lo;
-      }
-      this->write_array(row_buf, sizeof(row_buf));
+      build_rotated_half_row(buffer_, rotation_, py, px_start, row_buf);
+      this->write_array(row_buf, HALF_ROW_BYTES);
     }
     if ((py & 0x3F) == 0)
       App.feed_wdt();
   }
 
   this->disable();
-  if (chips & CHIP_MASTER)
-    cs_m_pin_->digital_write(true);
-  if (chips & CHIP_SLAVE)
-    cs_s_pin_->digital_write(true);
+  select_chips_(chips, false);
 }
 
 void EL133UF1::free_buffer_() {

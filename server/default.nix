@@ -65,7 +65,7 @@ let
 
     src = ./.;
 
-    vendorSha256 = "qr3hNJxCT8YPQntKCCPNO2yaETswziGXAd4lQELsDGg=";
+    vendorHash = "sha256-qr3hNJxCT8YPQntKCCPNO2yaETswziGXAd4lQELsDGg=";
   };
 
   # Wrap server so it has access to smartcrop in its PATH

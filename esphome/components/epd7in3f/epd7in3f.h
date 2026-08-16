@@ -1,17 +1,19 @@
 #pragma once
 
+#include "esphome/components/eink_frame/eink_frame.h"
+#include "esphome/components/spi/spi.h"
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
-#include "esphome/components/spi/spi.h"
-
-#include <string>
 
 namespace esphome {
 namespace epd7in3f {
 
+// Waveshare EPD7IN3F, 7-color ACeP, 800x480. Image data is streamed straight to
+// the panel as it arrives, so no frame buffer is needed.
 class EPD7IN3F : public Component,
                  public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW,
-                                       spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_2MHZ> {
+                                       spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_2MHZ>,
+                 public eink_frame::EinkFrameDisplay {
  public:
   void setup() override;
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
@@ -19,26 +21,17 @@ class EPD7IN3F : public Component,
   void set_dc_pin(GPIOPin *pin) { dc_pin_ = pin; }
   void set_reset_pin(GPIOPin *pin) { reset_pin_ = pin; }
   void set_busy_pin(GPIOPin *pin) { busy_pin_ = pin; }
-  void set_width(int width) { width_ = width; }
-  void set_height(int height) { height_ = height; }
-  void set_flip_vertical(bool flip) { flip_vertical_ = flip; }
-  void set_flip_horizontal(bool flip) { flip_horizontal_ = flip; }
 
-  // JSON body describing this display's capabilities, sent to the frame server.
-  std::string get_image_request_body() const;
-  size_t get_image_byte_count() const { return ((size_t) width_ / 2) * height_; }
-
-  // Streaming image interface: begin_image(), then any number of
-  // write_image_data() chunks, then finish_image(true) to refresh the panel
-  // (or finish_image(false) to abandon a failed transfer).
-  void begin_image();
-  void write_image_data(const uint8_t *data, size_t len);
-  void finish_image(bool ok);
-
-  void wake();
-  void sleep();
+  void wake() override;
+  void sleep() override;
 
  protected:
+  const char *frame_tag_() const override;
+  const eink_frame::ColorSpace &get_color_space() const override { return eink_frame::COLOR7_COLOR_SPACE; }
+  void on_begin_image_() override;
+  void on_image_data_(const uint8_t *data, size_t len) override;
+  void on_finish_image_(bool complete) override;
+
   void init_panel_();
   void reset_();
   void send_command_(uint8_t command);
@@ -49,11 +42,6 @@ class EPD7IN3F : public Component,
   GPIOPin *dc_pin_;
   GPIOPin *reset_pin_;
   GPIOPin *busy_pin_;
-  int width_{800};
-  int height_{480};
-  bool flip_vertical_{false};
-  bool flip_horizontal_{false};
-  size_t bytes_written_{0};
   bool sleeping_{false};
 };
 

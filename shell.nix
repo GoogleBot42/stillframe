@@ -6,7 +6,6 @@ mkShell {
   buildInputs = [
     go
     python3
-    platformio
     esphome
   ];
 

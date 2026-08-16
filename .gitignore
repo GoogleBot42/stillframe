@@ -1,7 +1,4 @@
 result
-.pio
-firmware/.vscode
-firmware/.gitignore
 .DS_Store
 esphome/secrets.yaml
 esphome/.esphome/

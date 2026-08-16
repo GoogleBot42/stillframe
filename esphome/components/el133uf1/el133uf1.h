@@ -1,10 +1,11 @@
 #pragma once
 
+#include "esphome/components/eink_frame/eink_frame.h"
+#include "esphome/components/spi/spi.h"
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
-#include "esphome/components/spi/spi.h"
 
-#include <string>
+#include "el133uf1_image.h"
 
 namespace esphome {
 namespace el133uf1 {
@@ -18,13 +19,13 @@ namespace el133uf1 {
 // orientation). Commands are a single CS frame of command byte + parameter
 // bytes with DC held high (BS0/BS1 strapping selects this interface mode).
 
-static const int NATIVE_WIDTH = 1200;   // panel native portrait width
-static const int NATIVE_HEIGHT = 1600;  // panel native portrait height
-
 class EL133UF1 : public Component,
                  public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW,
-                                       spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_10MHZ> {
+                                       spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_10MHZ>,
+                 public eink_frame::EinkFrameDisplay {
  public:
+  EL133UF1() { this->set_rotation(rotation_); }
+
   void setup() override;
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
@@ -36,27 +37,17 @@ class EL133UF1 : public Component,
   void set_pwr_en_pin(GPIOPin *pin) { pwr_en_pin_ = pin; }
   void set_bs0_pin(GPIOPin *pin) { bs0_pin_ = pin; }
   void set_bs1_pin(GPIOPin *pin) { bs1_pin_ = pin; }
-  void set_rotation(int rotation) { rotation_ = rotation; }
-  void set_flip_vertical(bool flip) { flip_vertical_ = flip; }
-  void set_flip_horizontal(bool flip) { flip_horizontal_ = flip; }
 
-  // JSON body describing this display's capabilities, sent to the frame server.
-  std::string get_image_request_body() const;
-  size_t get_image_byte_count() const { return ((size_t) NATIVE_WIDTH / 2) * NATIVE_HEIGHT; }
+  // The panel resolution is fixed; the rotation decides which way round the
+  // image is requested from the server (the byte count is the same either way).
+  void set_rotation(int rotation) {
+    rotation_ = rotation;
+    this->set_width(rotation == 0 ? NATIVE_WIDTH : NATIVE_HEIGHT);
+    this->set_height(rotation == 0 ? NATIVE_HEIGHT : NATIVE_WIDTH);
+  }
 
-  // Streaming image interface: begin_image(), then any number of
-  // write_image_data() chunks, then finish_image(true) to refresh the panel
-  // (or finish_image(false) to abandon a failed transfer).
-  //
-  // Unlike the single-controller panels, data cannot be forwarded to the
-  // panel as it arrives: each controller needs its half of every row, so the
-  // image is buffered (in PSRAM) and split/rotated during finish_image().
-  void begin_image();
-  void write_image_data(const uint8_t *data, size_t len);
-  void finish_image(bool ok);
-
-  void wake() {}  // panel is powered on per-update in begin_image()
-  void sleep();
+  void wake() override {}  // panel is powered on per-update in begin_image()
+  void sleep() override;
 
  protected:
   enum ChipId : uint8_t {
@@ -65,12 +56,22 @@ class EL133UF1 : public Component,
     CHIP_BOTH = CHIP_MASTER | CHIP_SLAVE,
   };
 
+  const char *frame_tag_() const override;
+  const eink_frame::ColorSpace &get_color_space() const override { return eink_frame::SPECTRA6_COLOR_SPACE; }
+
+  // Unlike the single-controller panels, data cannot be forwarded to the panel
+  // as it arrives: each controller needs its half of every row, so the image is
+  // buffered (in PSRAM) and split/rotated during finish_image().
+  void on_begin_image_() override;
+  void on_image_data_(const uint8_t *data, size_t len) override;
+  void on_finish_image_(bool complete) override;
+
   void power_on_and_init_();
   void power_off_();
   bool wait_busy_(uint32_t timeout_ms);
   void send_command_(uint8_t cmd, const uint8_t *data, size_t len, uint8_t chips);
+  void select_chips_(uint8_t chips, bool selected);
   void send_image_half_(uint8_t chips, int px_start);
-  uint8_t get_pixel_(int sx, int sy, int src_width) const;
   void free_buffer_();
 
   GPIOPin *cs_m_pin_;
@@ -83,13 +84,9 @@ class EL133UF1 : public Component,
   GPIOPin *bs1_pin_{nullptr};
 
   int rotation_{90};  // 0 (portrait), 90 or 270 (landscape)
-  bool flip_vertical_{false};
-  bool flip_horizontal_{false};
 
   uint8_t *buffer_{nullptr};
-  size_t bytes_written_{0};
   bool powered_{false};
-  bool transfer_failed_{false};
 };
 
 }  // namespace el133uf1

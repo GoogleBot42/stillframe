@@ -1,10 +1,10 @@
 #include "it8951_spi.h"
+#include "esphome/components/eink_frame/eink_wait.h"
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
 #include <cinttypes>
-#include <cstdio>
 
 namespace esphome {
 namespace it8951_spi {
@@ -13,8 +13,6 @@ static const char *const TAG = "it8951_spi";
 
 static const uint32_t HRDY_TIMEOUT_MS = 5000;
 static const uint32_t REFRESH_TIMEOUT_MS = 40000;
-// Each burst is a separate "write data" SPI cycle (preamble + payload) with an
-// HRDY check in front, so the IT8951 input FIFO can never overrun.
 static const size_t BURST_SIZE = 2048;
 
 void IT8951SPI::setup() {
@@ -51,26 +49,10 @@ void IT8951SPI::setup() {
   ESP_LOGI(TAG, "IT8951 initialized");
 }
 
-std::string IT8951SPI::get_image_request_body() const {
-  char head[128];
-  snprintf(head, sizeof(head), "{\"width\":%d,\"height\":%d,\"flip_vertical\":%s,\"flip_horizonal\":%s,",
-           width_, height_, flip_vertical_ ? "true" : "false", flip_horizontal_ ? "true" : "false");
+const char *IT8951SPI::frame_tag_() const { return TAG; }
 
-  std::string body(head);
-  body += "\"color_space\":[";
-  for (int i = 0; i < 16; i++) {
-    char entry[80];
-    float v = i / 15.0f;
-    snprintf(entry, sizeof(entry), "%s{\"color_code\":%d,\"rgb_color\":[%.4f,%.4f,%.4f]}", i ? "," : "", i, v, v, v);
-    body += entry;
-  }
-  body += "]}";
-  return body;
-}
-
-void IT8951SPI::begin_image() {
-  bytes_written_ = 0;
-  have_carry_ = false;
+void IT8951SPI::on_begin_image_() {
+  packer_.reset();
 
   wait_for_display_ready_(REFRESH_TIMEOUT_MS);
 
@@ -85,64 +67,31 @@ void IT8951SPI::begin_image() {
   lcd_send_cmd_arg_(IT8951_TCON_LD_IMG_AREA, args, 5);
 }
 
-void IT8951SPI::write_image_data(const uint8_t *data, size_t len) {
-  size_t expected = get_image_byte_count();
-  if (bytes_written_ + len > expected)
-    len = expected - bytes_written_;
-  if (len == 0)
-    return;
-
-  // The IT8951 expects 16-bit words; each pair of server bytes is sent
-  // high-byte-swapped (b1, b0), matching the legacy firmware's word writes.
+void IT8951SPI::on_image_data_(const uint8_t *data, size_t len) {
   uint8_t burst[BURST_SIZE];
-  size_t burst_len = 0;
-
-  for (size_t i = 0; i < len; i++) {
-    if (!have_carry_) {
-      carry_byte_ = data[i];
-      have_carry_ = true;
-      continue;
-    }
-    burst[burst_len++] = data[i];
-    burst[burst_len++] = carry_byte_;
-    have_carry_ = false;
-
-    if (burst_len == BURST_SIZE) {
-      wait_ready_(HRDY_TIMEOUT_MS);
-      this->enable();
-      this->transfer_byte(PREAMBLE_WRITE >> 8);
-      this->transfer_byte(PREAMBLE_WRITE & 0xFF);
-      wait_ready_(HRDY_TIMEOUT_MS);
-      this->write_array(burst, burst_len);
-      this->disable();
-      burst_len = 0;
-      App.feed_wdt();
-    }
-  }
-
-  if (burst_len > 0) {
-    wait_ready_(HRDY_TIMEOUT_MS);
-    this->enable();
-    this->transfer_byte(PREAMBLE_WRITE >> 8);
-    this->transfer_byte(PREAMBLE_WRITE & 0xFF);
-    wait_ready_(HRDY_TIMEOUT_MS);
-    this->write_array(burst, burst_len);
-    this->disable();
-  }
-
-  bytes_written_ += len;
+  packer_.feed(data, len, burst, BURST_SIZE, [this](const uint8_t *out, size_t out_len) {
+    this->write_burst_(out, out_len);
+    App.feed_wdt();
+  });
 }
 
-void IT8951SPI::finish_image(bool ok) {
-  lcd_write_cmd_(IT8951_TCON_LD_IMG_END);
+// Each burst is a separate "write data" SPI cycle (preamble + payload) with an
+// HRDY check in front, so the IT8951 input FIFO can never overrun.
+void IT8951SPI::write_burst_(const uint8_t *data, size_t len) {
+  wait_ready_(HRDY_TIMEOUT_MS);
+  this->enable();
+  this->transfer_byte(PREAMBLE_WRITE >> 8);
+  this->transfer_byte(PREAMBLE_WRITE & 0xFF);
+  wait_ready_(HRDY_TIMEOUT_MS);
+  this->write_array(data, len);
+  this->disable();
+}
 
-  if (!ok || bytes_written_ < get_image_byte_count()) {
-    ESP_LOGE(TAG, "Image transfer failed (%u/%u bytes) — skipping refresh", (unsigned) bytes_written_,
-             (unsigned) get_image_byte_count());
+void IT8951SPI::on_image_end_() { lcd_write_cmd_(IT8951_TCON_LD_IMG_END); }
+
+void IT8951SPI::on_finish_image_(bool complete) {
+  if (!complete)
     return;
-  }
-
-  ESP_LOGI(TAG, "Image data sent, refreshing display...");
 
   // Display area with mode 2 (fast gray clear)
   lcd_write_cmd_(USDEF_I80_CMD_DPY_AREA);
@@ -155,7 +104,6 @@ void IT8951SPI::finish_image(bool ok) {
   // Wait for the refresh to actually finish so a following sleep()/deep sleep
   // doesn't abort it mid-update.
   wait_for_display_ready_(REFRESH_TIMEOUT_MS);
-  ESP_LOGI(TAG, "Display refresh complete");
 }
 
 void IT8951SPI::wake() {
@@ -170,16 +118,7 @@ void IT8951SPI::sleep() {
 
 // HRDY is HIGH when ready. Returns false on timeout.
 bool IT8951SPI::wait_ready_(uint32_t timeout_ms) {
-  uint32_t start = millis();
-  while (!hrdy_pin_->digital_read()) {
-    if (millis() - start > timeout_ms) {
-      ESP_LOGE(TAG, "Timeout (%" PRIu32 " ms) waiting for HRDY", timeout_ms);
-      return false;
-    }
-    App.feed_wdt();
-    delay(1);
-  }
-  return true;
+  return eink_frame::wait_for_pin(hrdy_pin_, true, timeout_ms, TAG, "HRDY");
 }
 
 void IT8951SPI::lcd_write_cmd_(uint16_t cmd) {

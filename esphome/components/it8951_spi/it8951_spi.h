@@ -1,10 +1,11 @@
 #pragma once
 
+#include "esphome/components/eink_frame/eink_frame.h"
+#include "esphome/components/spi/spi.h"
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
-#include "esphome/components/spi/spi.h"
 
-#include <string>
+#include "it8951_words.h"
 
 namespace esphome {
 namespace it8951_spi {
@@ -47,35 +48,30 @@ struct IT8951DevInfo {
   uint16_t lut_version[8];
 };
 
+// IT8951 controller driving a 16-grayscale panel (1872x1404 by default). Image
+// data is streamed into the controller's frame buffer as it arrives.
 class IT8951SPI : public Component,
                   public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW,
-                                        spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_20MHZ> {
+                                        spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_20MHZ>,
+                  public eink_frame::EinkFrameDisplay {
  public:
   void setup() override;
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
   void set_reset_pin(GPIOPin *pin) { reset_pin_ = pin; }
   void set_hrdy_pin(GPIOPin *pin) { hrdy_pin_ = pin; }
-  void set_width(int width) { width_ = width; }
-  void set_height(int height) { height_ = height; }
-  void set_flip_vertical(bool flip) { flip_vertical_ = flip; }
-  void set_flip_horizontal(bool flip) { flip_horizontal_ = flip; }
 
-  // JSON body describing this display's capabilities, sent to the frame server.
-  std::string get_image_request_body() const;
-  size_t get_image_byte_count() const { return ((size_t) width_ * height_) / 2; }
-
-  // Streaming image interface: begin_image(), then any number of
-  // write_image_data() chunks, then finish_image(true) to refresh the panel
-  // (or finish_image(false) to abandon a failed transfer).
-  void begin_image();
-  void write_image_data(const uint8_t *data, size_t len);
-  void finish_image(bool ok);
-
-  void wake();
-  void sleep();
+  void wake() override;
+  void sleep() override;
 
  protected:
+  const char *frame_tag_() const override;
+  const eink_frame::ColorSpace &get_color_space() const override { return eink_frame::GREY16_COLOR_SPACE; }
+  void on_begin_image_() override;
+  void on_image_data_(const uint8_t *data, size_t len) override;
+  void on_image_end_() override;
+  void on_finish_image_(bool complete) override;
+
   bool wait_ready_(uint32_t timeout_ms);
   void lcd_write_cmd_(uint16_t cmd);
   void lcd_write_data_(uint16_t data);
@@ -88,19 +84,14 @@ class IT8951SPI : public Component,
   uint16_t read_reg_(uint16_t addr);
   void set_img_buf_base_addr_(uint32_t addr);
   bool wait_for_display_ready_(uint32_t timeout_ms);
+  void write_burst_(const uint8_t *data, size_t len);
 
   GPIOPin *reset_pin_;
   GPIOPin *hrdy_pin_;
-  int width_{1872};
-  int height_{1404};
-  bool flip_vertical_{false};
-  bool flip_horizontal_{false};
 
   IT8951DevInfo dev_info_{};
   uint32_t img_buf_addr_{0};
-  size_t bytes_written_{0};
-  uint8_t carry_byte_{0};
-  bool have_carry_{false};
+  WordPacker packer_;
 };
 
 }  // namespace it8951_spi

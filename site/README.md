@@ -4,18 +4,53 @@
 compiled factory firmware. Together they let anyone flash a DynamicFrame from
 a browser and then receive updates over the air, with no toolchain.
 
+**Forge topology:** the source of truth is Gitea
+(`git.neet.dev/zuckerberg/picture-frame`, Tailscale-only). A **public
+downstream mirror** at
+[github.com/GoogleBot42/picture-frame](https://github.com/GoogleBot42/picture-frame)
+exists solely for public distribution: it receives every branch and tag via
+Gitea's push mirror, its Actions build the firmware, and its Pages site is what
+devices poll. **Never create commits, tags, or edits on GitHub directly** — all
+git data flows one way, Gitea → GitHub.
+
 ## How the pipeline works
 
-1. `.github/workflows/firmware.yml` runs on every push to `main` that touches
-   `esphome/**` or `site/**` (and on manual dispatch).
-2. A matrix job builds each of the five secret-free configs in
+1. `.github/workflows/firmware.yml` fires on a pushed `vX.Y.Z` **tag** — and
+   nothing else. (`workflow_dispatch` is a manual escape hatch: run it against
+   an existing tag to re-publish; dispatching from a branch is rejected.)
+2. A `version` job resolves the version from the tag, validates the format and
+   the 30-character ESPHome cap, and fails in seconds if the tag is malformed.
+3. A matrix job builds each of the five secret-free configs in
    `esphome/factory/` with [`esphome/build-action`](https://github.com/esphome/build-action),
    using `complete-manifest: true`.
-3. Every build is stamped with the same version, `1.<run number>`, passed in as
-   the ESPHome substitution `firmware_version`.
-4. The deploy job lays the build outputs out as `firmware/<variant>/` next to
-   the contents of `site/`, and publishes the whole tree with
+4. Every build is stamped with the tag's version — tag `v1.3.0` stamps `1.3.0`
+   — passed in as the ESPHome substitution `firmware_version`.
+5. The `release` job attaches every `*.factory.bin`, `*.ota.bin` and
+   `<variant>.manifest.json` to the GitHub Release for the tag
+   (`softprops/action-gh-release`, with generated release notes).
+6. The `deploy` job lays the same build outputs out as `firmware/<variant>/`
+   next to the contents of `site/`, and publishes the whole tree with
    `actions/upload-pages-artifact` + `actions/deploy-pages`.
+
+Publishing a release **is** the OTA push: the Pages URLs below are stable and
+always serve the newest stable release, so the moment the deploy finishes every
+frame on an older version sees an update. That is why builds are gated on tags
+rather than on pushes to `main` — a commit should not ship firmware to every
+device in the house.
+
+Steps 5 and 6 are independent on purpose. Pages is the channel devices actually
+poll, so a flaky release-asset upload must never block the OTA; the release
+assets are a permanent per-version archive for humans.
+
+**Pre-releases.** Give the tag any semver prerelease suffix — `v1.3.0-rc.1`.
+That single fact drives the whole split: the GitHub Release is marked
+*prerelease* and the Pages deploy is **skipped**, so the URL devices poll keeps
+serving the last stable build. Install a pre-release by hand
+(`esphome run esphome/<variant>.yaml --device <IP>`, or flash the
+`*.factory.bin` from the release page).
+
+A failed run is recovered by re-running it from the Actions tab — the release
+step upserts, so it is idempotent. Never fix a release by pushing to GitHub.
 
 The single `manifest.json` per variant serves two consumers:
 
@@ -46,10 +81,16 @@ esphome:
     version: ${firmware_version}
 ```
 
-The workflow overrides it with `-s firmware_version 1.<run number>`, and fails
-the build with an explicit message if the resulting manifest version doesn't
-match — otherwise devices would silently keep a hard-coded version and never
-update.
+The workflow overrides it with `-s firmware_version <tag without the leading v>`,
+and fails the build with an explicit message if the resulting manifest version
+doesn't match — otherwise devices would silently keep a hard-coded version and
+never update.
+
+There is no `VERSION` file: nothing in the tree carries a version, so the tag is
+the single source of truth and a version can never drift from what was tagged.
+It also cannot be published twice by accident, because a tag is cut once.
+(`dev` stays the default so local `esphome compile` of a factory config still
+works.)
 
 ## Published URLs
 
@@ -70,8 +111,38 @@ Each directory also holds `<name>.factory.bin` (USB install) and
 `<name>.ota.bin` (over-the-air update); the manifest references them by bare
 filename, resolved relative to itself.
 
-Use the Pages URLs rather than GitHub release asset URLs — release URLs redirect
-through long signed links that can overflow the ESPHome HTTP client's buffer.
+The GitHub Release for each tag carries the same files — every `*.factory.bin`,
+`*.ota.bin`, and the manifests renamed `<variant>.manifest.json` (release assets
+live in one flat namespace). They are a per-version archive, not the channel:
+devices must use the Pages URLs, because release URLs redirect through long
+signed links that can overflow the ESPHome HTTP client's buffer.
+
+## Cutting a release
+
+Everything starts on Gitea; GitHub only builds and hosts the artifacts. There is
+nothing to bump first — the tag is the version.
+
+```bash
+git tag -a v1.3.0 -m "v1.3.0"   # on Gitea's `main`, from a pushed commit
+git push origin v1.3.0
+```
+
+From there:
+
+1. the Gitea push mirror replicates the tag to GitHub (immediately if the mirror
+   syncs on push, otherwise on its interval — or hit *Synchronize now* in the
+   Gitea mirror settings);
+2. `.github/workflows/firmware.yml` fires on the mirrored tag, resolves the
+   version from it, builds all five variants, publishes the GitHub Release with
+   the binaries and manifests attached, and deploys Pages;
+3. every frame on an older version picks the update up on its next wake.
+
+Watch it at <https://github.com/GoogleBot42/picture-frame/actions>. A tag that
+lands on GitHub with no run means the mirror pushed with an identity Actions
+ignores — check the mirror credential first.
+
+Use `v1.3.0-rc.1` (any prerelease suffix) to build and archive a candidate
+without moving the channel devices poll. Never tag on GitHub.
 
 ## One-time setup for the repo owner
 
@@ -85,21 +156,30 @@ a push mirror, and Actions run exclusively on the GitHub side.
    `https://github.com/GoogleBot42/picture-frame.git`, authenticate with a
    GitHub personal access token that has `repo` scope (username `GoogleBot42`,
    password = the token), and enable the sync interval. Push `main` at least
-   once so the branch exists on GitHub.
+   once so the branch exists on GitHub. The mirror must push with a
+   PAT/deploy-key identity — tags pushed by such an identity trigger Actions;
+   tags authored by `github-actions` would not.
 3. **Enable Actions on the mirror**: GitHub → *Settings* → *Actions* →
-   *General* → *Allow all actions and reusable workflows*. Mirrored repos can
-   land with Actions disabled, in which case pushes produce no builds.
+   *General* → *Allow all actions and reusable workflows*, with workflow
+   permissions allowing `contents: write` (the built-in `GITHUB_TOKEN` is
+   enough) so the release job can create releases and upload assets. Mirrored
+   repos can land with Actions disabled, in which case tags produce no builds.
 4. **Enable Pages**: GitHub → *Settings* → *Pages* → *Build and deployment* →
    *Source*: **GitHub Actions**. Do **not** pick "Deploy from a branch"; the
    workflow uploads the artifact directly.
-5. **Run it once**: *Actions* → *Firmware* → *Run workflow*, or push a commit
-   touching `esphome/**`. The first run creates the `github-pages` environment
-   and the deployment; afterwards
+5. **Cut the first release**: tag `v1.0.0` on Gitea and push it (see
+   [Cutting a release](#cutting-a-release)). The first run creates the
+   `github-pages` environment and the deployment; afterwards
    `https://googlebot42.github.io/picture-frame/` is live.
 
 No secrets need to be configured on GitHub — the workflow only uses the
 built-in `GITHUB_TOKEN` and the Pages OIDC identity token, and the factory
 configs contain no credentials.
+
+Gitea Actions is **not** used by this repo. The workflow carries a
+`github.server_url == 'https://github.com'` guard so that enabling Gitea Actions
+later cannot make the Gitea side start publishing — Gitea stays the source of
+truth, GitHub stays the only publisher.
 
 ## Working on the page locally
 

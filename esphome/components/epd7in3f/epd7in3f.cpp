@@ -1,10 +1,7 @@
 #include "epd7in3f.h"
-#include "esphome/core/application.h"
+#include "esphome/components/eink_frame/eink_wait.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
-
-#include <cinttypes>
-#include <cstdio>
 
 namespace esphome {
 namespace epd7in3f {
@@ -123,55 +120,24 @@ void EPD7IN3F::init_panel_() {
   sleeping_ = false;
 }
 
-std::string EPD7IN3F::get_image_request_body() const {
-  char head[128];
-  snprintf(head, sizeof(head), "{\"width\":%d,\"height\":%d,\"flip_vertical\":%s,\"flip_horizonal\":%s,",
-           width_, height_, flip_vertical_ ? "true" : "false", flip_horizontal_ ? "true" : "false");
+const char *EPD7IN3F::frame_tag_() const { return TAG; }
 
-  std::string body(head);
-  body += "\"color_space\":["
-          "{\"color_code\":0,\"rgb_color\":[0,0,0]},"
-          "{\"color_code\":1,\"rgb_color\":[1,1,1]},"
-          "{\"color_code\":2,\"rgb_color\":[0.059,0.329,0.119]},"
-          "{\"color_code\":3,\"rgb_color\":[0.061,0.147,0.336]},"
-          "{\"color_code\":4,\"rgb_color\":[0.574,0.066,0.010]},"
-          "{\"color_code\":5,\"rgb_color\":[0.982,0.756,0.004]},"
-          "{\"color_code\":6,\"rgb_color\":[0.795,0.255,0.018]}]}";
-  return body;
-}
-
-void EPD7IN3F::begin_image() {
+void EPD7IN3F::on_begin_image_() {
   if (sleeping_)
     wake();
-  bytes_written_ = 0;
   send_command_(0x10);  // start data transmission
 }
 
-void EPD7IN3F::write_image_data(const uint8_t *data, size_t len) {
-  size_t expected = get_image_byte_count();
-  if (bytes_written_ + len > expected)
-    len = expected - bytes_written_;
-  if (len == 0)
-    return;
-
+void EPD7IN3F::on_image_data_(const uint8_t *data, size_t len) {
   dc_pin_->digital_write(true);
   this->enable();
   this->write_array(data, len);
   this->disable();
-
-  bytes_written_ += len;
 }
 
-void EPD7IN3F::finish_image(bool ok) {
-  if (!ok || bytes_written_ < get_image_byte_count()) {
-    ESP_LOGE(TAG, "Image transfer failed (%u/%u bytes) — skipping refresh", (unsigned) bytes_written_,
-             (unsigned) get_image_byte_count());
-    return;
-  }
-
-  ESP_LOGI(TAG, "Image data sent, refreshing display...");
-  turn_on_display_();
-  ESP_LOGI(TAG, "Display refresh complete");
+void EPD7IN3F::on_finish_image_(bool complete) {
+  if (complete)
+    turn_on_display_();
 }
 
 void EPD7IN3F::wake() {
@@ -215,16 +181,7 @@ void EPD7IN3F::send_data_(uint8_t data) {
 
 // Busy pin is active LOW — wait while LOW. Returns false on timeout.
 bool EPD7IN3F::wait_busy_(uint32_t timeout_ms) {
-  uint32_t start = millis();
-  while (!busy_pin_->digital_read()) {
-    if (millis() - start > timeout_ms) {
-      ESP_LOGE(TAG, "Timeout (%" PRIu32 " ms) waiting for busy pin", timeout_ms);
-      return false;
-    }
-    App.feed_wdt();
-    delay(1);
-  }
-  return true;
+  return eink_frame::wait_for_pin(busy_pin_, true, timeout_ms, TAG, "busy pin");
 }
 
 void EPD7IN3F::turn_on_display_() {
