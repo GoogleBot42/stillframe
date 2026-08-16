@@ -34,7 +34,7 @@ of panel-specific hooks.
 ## Setting up a frame
 
 1. **Flash from the browser** — open the
-   [install page](https://googlebot42.github.io/picture-frame/) in Chrome or
+   [install page](https://googlebot42.github.io/stillframe/) in Chrome or
    Edge, plug the board in over USB, and click Install for your variant.
 2. **Wi-Fi in the same dialog** — the installer prompts for your network via
    Improv Serial. There is deliberately no fallback hotspot; to re-provision
@@ -92,7 +92,7 @@ See `CLAUDE.md` for the full architecture notes and command reference.
 ## Releases
 
 The canonical repo lives on Gitea; a public mirror at
-[GoogleBot42/picture-frame](https://github.com/GoogleBot42/picture-frame)
+[GoogleBot42/stillframe](https://github.com/GoogleBot42/stillframe)
 builds and hosts releases. Firmware is built **only** for version tags:
 
 ```bash

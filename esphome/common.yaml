@@ -21,7 +21,7 @@ substitutions:
   # Where the custom display components come from. Defaults to the published
   # repo so an adopted config builds anywhere; esphome/dev.yaml overrides this
   # with the local `components` directory for driver development.
-  components_source: github://GoogleBot42/picture-frame@main
+  components_source: github://GoogleBot42/stillframe@main
   # Initial value of the "Server URL" text entity (first boot / after reset).
   default_server_url: http://homeassistant.local:8080
   # Wake period, in whole minutes. This is only the *initial* value of the

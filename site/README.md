@@ -5,9 +5,9 @@ compiled factory firmware. Together they let anyone flash a Stillframe from
 a browser and then receive updates over the air, with no toolchain.
 
 **Forge topology:** the source of truth is Gitea
-(`git.neet.dev/zuckerberg/picture-frame`, Tailscale-only). A **public
+(`git.neet.dev/zuckerberg/stillframe`, Tailscale-only). A **public
 downstream mirror** at
-[github.com/GoogleBot42/picture-frame](https://github.com/GoogleBot42/picture-frame)
+[github.com/GoogleBot42/stillframe](https://github.com/GoogleBot42/stillframe)
 exists solely for public distribution: it receives every branch and tag via
 Gitea's push mirror, its Actions build the firmware, and its Pages site is what
 devices poll. **Never create commits, tags, or edits on GitHub directly** — all
@@ -27,7 +27,7 @@ git data flows one way, Gitea → GitHub.
    — passed in as the ESPHome substitution `firmware_version`. The workflow
    also overrides `components_source=../components`, so the custom display
    drivers are compiled from the tagged checkout rather than from
-   `github://GoogleBot42/picture-frame@main` (the default that makes an adopted
+   `github://GoogleBot42/stillframe@main` (the default that makes an adopted
    config buildable anywhere).
 5. The `release` job attaches every `*.factory.bin`, `*.ota.bin` and
    `<variant>.manifest.json` to the GitHub Release for the tag
@@ -108,7 +108,7 @@ still works.)
 
 The tag is the single source of truth for the *code*, too, but only because of
 the `components_source=../components` override in step 4. `esphome/common.yaml`
-defaults `components_source` to `github://GoogleBot42/picture-frame@main`, and
+defaults `components_source` to `github://GoogleBot42/stillframe@main`, and
 ESPHome clones that at build time — so without the override a release built
 from tag `v1.3.0` would compile the drivers from whatever was on `main` at that
 moment. Do not drop it.
@@ -117,14 +117,14 @@ moment. Do not drop it.
 
 | What | URL |
 | --- | --- |
-| Install page | `https://googlebot42.github.io/picture-frame/` |
-| Manifest (per variant) | `https://googlebot42.github.io/picture-frame/firmware/<variant>/manifest.json` |
+| Install page | `https://googlebot42.github.io/stillframe/` |
+| Manifest (per variant) | `https://googlebot42.github.io/stillframe/firmware/<variant>/manifest.json` |
 
 with `<variant>` one of `color7-tinypico`, `color7-tinys3`, `grey16-tinypico`,
 `grey16-tinys3`, `spectra13-inkplate`. For example:
 
 ```
-https://googlebot42.github.io/picture-frame/firmware/color7-tinypico/manifest.json
+https://googlebot42.github.io/stillframe/firmware/color7-tinypico/manifest.json
 ```
 
 That exact URL is what the factory configs put in `update:` → `source:`.
@@ -159,7 +159,7 @@ From there:
 3. every frame on an older version offers the update the next time it is held
    awake (see "Frames do not poll on a schedule" above).
 
-Watch it at <https://github.com/GoogleBot42/picture-frame/actions>. A tag that
+Watch it at <https://github.com/GoogleBot42/stillframe/actions>. A tag that
 lands on GitHub with no run means the mirror pushed with an identity Actions
 ignores — check the mirror credential first.
 
@@ -171,11 +171,11 @@ without moving the channel devices poll. Never tag on GitHub.
 This repository's canonical home is the private Gitea instance; GitHub is only
 a push mirror, and Actions run exclusively on the GitHub side.
 
-1. **Create the public GitHub repo** `GoogleBot42/picture-frame` (public, empty
+1. **Create the public GitHub repo** `GoogleBot42/stillframe` (public, empty
    — no README, no license, no `.gitignore`).
 2. **Configure push mirroring in Gitea**: repository → *Settings* →
    *Repository* → *Mirror Settings* → *Push Mirror*. Set the remote to
-   `https://github.com/GoogleBot42/picture-frame.git`, authenticate with a
+   `https://github.com/GoogleBot42/stillframe.git`, authenticate with a
    GitHub personal access token that has `repo` scope (username `GoogleBot42`,
    password = the token), and enable the sync interval. Push `main` at least
    once so the branch exists on GitHub. The mirror must push with a
@@ -192,7 +192,7 @@ a push mirror, and Actions run exclusively on the GitHub side.
 5. **Cut the first release**: tag `v1.0.0` on Gitea and push it (see
    [Cutting a release](#cutting-a-release)). The first run creates the
    `github-pages` environment and the deployment; afterwards
-   `https://googlebot42.github.io/picture-frame/` is live.
+   `https://googlebot42.github.io/stillframe/` is live.
 
 No secrets need to be configured on GitHub — the workflow only uses the
 built-in `GITHUB_TOKEN` and the Pages OIDC identity token, and the factory

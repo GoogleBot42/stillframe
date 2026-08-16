@@ -3,8 +3,8 @@
 #
 # WHERE THIS RUNS
 #   This repository's canonical home is a private Gitea instance
-#   (git.neet.dev/zuckerberg/picture-frame). The GitHub repo
-#   github.com/GoogleBot42/picture-frame is a READ-ONLY DOWNSTREAM MIRROR of
+#   (git.neet.dev/zuckerberg/stillframe). The GitHub repo
+#   github.com/GoogleBot42/stillframe is a READ-ONLY DOWNSTREAM MIRROR of
 #   it: it receives every branch and tag through Gitea's push mirror, its
 #   Actions build the firmware, and its Pages site is what devices poll.
 #   Releases are cut on Gitea (`git tag vX.Y.Z && git push origin vX.Y.Z`);
@@ -20,10 +20,10 @@
 #   nothing in the tree carries a version, CI derives it from the ref).
 #
 # WHAT IT PRODUCES
-#   https://googlebot42.github.io/picture-frame/                       — installer page (site/)
-#   https://googlebot42.github.io/picture-frame/firmware/<variant>/manifest.json
-#   https://googlebot42.github.io/picture-frame/firmware/<variant>/<name>.factory.bin
-#   https://googlebot42.github.io/picture-frame/firmware/<variant>/<name>.ota.bin
+#   https://googlebot42.github.io/stillframe/                       — installer page (site/)
+#   https://googlebot42.github.io/stillframe/firmware/<variant>/manifest.json
+#   https://googlebot42.github.io/stillframe/firmware/<variant>/<name>.factory.bin
+#   https://googlebot42.github.io/stillframe/firmware/<variant>/<name>.ota.bin
 #
 #   Those Pages URLs are STABLE — they always serve the newest stable release,
 #   which is why the `update:` component in esphome/factory/*.yaml can hard-code
@@ -199,7 +199,7 @@ jobs:
           release-summary: "Stillframe ${{ matrix.variant }} firmware ${{ env.FIRMWARE_VERSION }}"
           release-url: ${{ env.RELEASE_URL }}
           # `components_source` builds the custom display drivers from THIS
-          # checkout instead of `github://GoogleBot42/picture-frame@main` (the
+          # checkout instead of `github://GoogleBot42/stillframe@main` (the
           # default in esphome/common.yaml). Without it the YAML would come
           # from the tag but the C++ would be whatever happened to be on main
           # at build time — a release could ship driver code that was never

@@ -55,7 +55,7 @@ packages:
   device: !include ../color7-tinys3.yaml
 
 dashboard_import:
-  package_import_url: github://GoogleBot42/picture-frame/esphome/color7-tinys3.yaml@main
+  package_import_url: github://GoogleBot42/stillframe/esphome/color7-tinys3.yaml@main
   import_full_config: false
 
 ota:
@@ -65,7 +65,7 @@ update:
   - platform: http_request
     name: "Firmware"
     id: firmware_update
-    source: https://googlebot42.github.io/picture-frame/firmware/color7-tinys3/manifest.json
+    source: https://googlebot42.github.io/stillframe/firmware/color7-tinys3/manifest.json
     # Never poll on a schedule: a frame is asleep almost all of the time, so a
     # periodic check just means "hit GitHub Pages on every wake". The explicit
     # `component.update: firmware_update` in on_boot above is the only

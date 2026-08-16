@@ -2,8 +2,8 @@
 #
 # WHERE THIS RUNS
 #   Same convention as firmware.yml: this repository's canonical home is a
-#   private Gitea instance (git.neet.dev/zuckerberg/picture-frame) and
-#   github.com/GoogleBot42/picture-frame is a READ-ONLY DOWNSTREAM MIRROR that
+#   private Gitea instance (git.neet.dev/zuckerberg/stillframe) and
+#   github.com/GoogleBot42/stillframe is a READ-ONLY DOWNSTREAM MIRROR that
 #   receives every branch and tag. Gitea Actions also picks up
 #   .github/workflows/, so every job carries the same
 #   `github.server_url == 'https://github.com'` guard and this workflow runs on
@@ -150,7 +150,7 @@ jobs:
         run: |
           set -uo pipefail
           # The configs default `components_source` to the published repo
-          # (github://GoogleBot42/picture-frame@main) so an adopted config
+          # (github://GoogleBot42/stillframe@main) so an adopted config
           # builds anywhere. Override it to the checkout's own components so CI
           # validates THIS commit and never reaches the network. The path is
           # resolved relative to the directory of the config being validated,

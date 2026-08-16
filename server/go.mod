@@ -1,4 +1,4 @@
-module git.neet.dev/zuckerberg/picture-frame/server
+module git.neet.dev/zuckerberg/stillframe/server
 
 go 1.19
 
