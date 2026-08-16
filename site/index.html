@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Stillframe — install firmware</title>
+<meta
+  name="description"
+  content="Install Stillframe e-ink picture frame firmware straight from your browser."
+/>
+
+<!-- esp-web-tools is loaded from unpkg; pinned to the v10 major line. -->
+<script
+  type="module"
+  src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"
+></script>
+
+<style>
+  :root {
+    color-scheme: light dark;
+
+    --bg: #fbfbfa;
+    --surface: #ffffff;
+    --border: #e3e2df;
+    --text: #1b1b19;
+    --muted: #6b6a65;
+    --accent: #2f6f4e;
+    --accent-text: #ffffff;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131412;
+      --surface: #1c1e1b;
+      --border: #2e312c;
+      --text: #eceae4;
+      --muted: #9b9a92;
+      --accent: #7fc7a0;
+      --accent-text: #10231a;
+    }
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    padding: 3rem 1.25rem 5rem;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  main {
+    max-width: 44rem;
+    margin: 0 auto;
+  }
+
+  h1 {
+    margin: 0 0 0.25rem;
+    font-size: 2rem;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+  }
+
+  h2 {
+    margin: 3rem 0 1rem;
+    font-size: 1.05rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  h3 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+
+  p {
+    margin: 0 0 1rem;
+  }
+
+  a {
+    color: inherit;
+    text-underline-offset: 0.15em;
+  }
+
+  .tagline {
+    color: var(--muted);
+    font-size: 1.1rem;
+    margin-bottom: 2rem;
+  }
+
+  .note {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    border-radius: 6px;
+    padding: 0.9rem 1.1rem;
+    font-size: 0.95rem;
+  }
+
+  .note p:last-child {
+    margin-bottom: 0;
+  }
+
+  ol.steps {
+    margin: 0;
+    padding-left: 1.3rem;
+  }
+
+  ol.steps li {
+    margin-bottom: 0.5rem;
+  }
+
+  .devices {
+    display: grid;
+    gap: 1rem;
+  }
+
+  .device {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.1rem 1.25rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+
+  .device-info {
+    flex: 1 1 20rem;
+    min-width: 0;
+  }
+
+  .device-info p {
+    margin: 0.2rem 0 0;
+    color: var(--muted);
+    font-size: 0.92rem;
+  }
+
+  .device-meta {
+    display: block;
+    margin-top: 0.35rem;
+    font-size: 0.8rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  button.install {
+    appearance: none;
+    border: 0;
+    border-radius: 999px;
+    padding: 0.55rem 1.4rem;
+    font: inherit;
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--accent-text);
+    background: var(--accent);
+    cursor: pointer;
+  }
+
+  button.install:hover {
+    filter: brightness(1.08);
+  }
+
+  esp-web-install-button[install-unsupported] .fallback,
+  esp-web-install-button .fallback {
+    color: var(--muted);
+    font-size: 0.9rem;
+    max-width: 16rem;
+    display: inline-block;
+  }
+
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.05em 0.35em;
+  }
+
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+</style>
+</head>
+<body>
+
+<main>
+  <h1>Stillframe</h1>
+  <p class="tagline">
+    E-ink picture frame firmware, built with ESPHome. Install it from this page
+    over USB — no toolchain, no command line.
+  </p>
+
+  <div class="note">
+    <p>
+      <strong>You need Chrome or Edge on a desktop computer.</strong> Installing
+      uses Web Serial, which Safari and mobile browsers do not support. Connect
+      the board over USB before you start.
+    </p>
+  </div>
+
+  <h2>Install</h2>
+
+  <div class="devices">
+    <div class="device">
+      <div class="device-info">
+        <h3>7-colour — TinyPico</h3>
+        <p>Waveshare EPD7IN3F, 800 &times; 480, 7 colours. TinyPico (ESP32).</p>
+        <span class="device-meta" data-version></span>
+      </div>
+      <esp-web-install-button manifest="./firmware/color7-tinypico/manifest.json">
+        <button class="install" slot="activate">Install</button>
+        <span class="fallback" slot="unsupported"
+          >Your browser can't install firmware — use Chrome or Edge.</span
+        >
+        <span class="fallback" slot="not-allowed"
+          >Installing requires an https:// page.</span
+        >
+      </esp-web-install-button>
+    </div>
+
+    <div class="device">
+      <div class="device-info">
+        <h3>7-colour — TinyS3</h3>
+        <p>Waveshare EPD7IN3F, 800 &times; 480, 7 colours. TinyS3 (ESP32-S3).</p>
+        <span class="device-meta" data-version></span>
+      </div>
+      <esp-web-install-button manifest="./firmware/color7-tinys3/manifest.json">
+        <button class="install" slot="activate">Install</button>
+        <span class="fallback" slot="unsupported"
+          >Your browser can't install firmware — use Chrome or Edge.</span
+        >
+        <span class="fallback" slot="not-allowed"
+          >Installing requires an https:// page.</span
+        >
+      </esp-web-install-button>
+    </div>
+
+    <div class="device">
+      <div class="device-info">
+        <h3>16-grey — TinyPico</h3>
+        <p>
+          IT8951 controller, 1872 &times; 1404, 16 greyscale levels. TinyPico
+          (ESP32).
+        </p>
+        <span class="device-meta" data-version></span>
+      </div>
+      <esp-web-install-button manifest="./firmware/grey16-tinypico/manifest.json">
+        <button class="install" slot="activate">Install</button>
+        <span class="fallback" slot="unsupported"
+          >Your browser can't install firmware — use Chrome or Edge.</span
+        >
+        <span class="fallback" slot="not-allowed"
+          >Installing requires an https:// page.</span
+        >
+      </esp-web-install-button>
+    </div>
+
+    <div class="device">
+      <div class="device-info">
+        <h3>16-grey — TinyS3</h3>
+        <p>
+          IT8951 controller, 1872 &times; 1404, 16 greyscale levels. TinyS3
+          (ESP32-S3).
+        </p>
+        <span class="device-meta" data-version></span>
+      </div>
+      <esp-web-install-button manifest="./firmware/grey16-tinys3/manifest.json">
+        <button class="install" slot="activate">Install</button>
+        <span class="fallback" slot="unsupported"
+          >Your browser can't install firmware — use Chrome or Edge.</span
+        >
+        <span class="fallback" slot="not-allowed"
+          >Installing requires an https:// page.</span
+        >
+      </esp-web-install-button>
+    </div>
+
+    <div class="device">
+      <div class="device-info">
+        <h3>13.3" Spectra 6 — Inkplate 13</h3>
+        <p>
+          EL133UF1 Spectra 6, 1600 &times; 1200, 6 colours. Soldered Inkplate 13
+          Spectra (ESP32-S3).
+        </p>
+        <span class="device-meta" data-version></span>
+      </div>
+      <esp-web-install-button
+        manifest="./firmware/spectra13-inkplate/manifest.json"
+      >
+        <button class="install" slot="activate">Install</button>
+        <span class="fallback" slot="unsupported"
+          >Your browser can't install firmware — use Chrome or Edge.</span
+        >
+        <span class="fallback" slot="not-allowed"
+          >Installing requires an https:// page.</span
+        >
+      </esp-web-install-button>
+    </div>
+  </div>
+
+  <h2>How it goes</h2>
+
+  <ol class="steps">
+    <li>Plug the board into your computer with a USB data cable.</li>
+    <li>
+      Pick your device above and press <strong>Install</strong>, then choose the
+      board's serial port in the browser dialog.
+    </li>
+    <li>
+      When flashing finishes, the same dialog offers
+      <strong>Connect to Wi-Fi</strong>. Enter your network there — the
+      credentials go straight to the device over USB.
+    </li>
+    <li>
+      Open Home Assistant. The frame appears under
+      <em>Settings &rarr; Devices &amp; Services</em> as a discovered ESPHome
+      device; click <strong>Configure</strong> to adopt it.
+    </li>
+  </ol>
+
+  <div class="note" style="margin-top: 1.5rem">
+    <p>
+      <strong>Updates come over Wi-Fi.</strong> Once adopted, each frame gets a
+      <em>Firmware</em> entity in Home Assistant that installs new releases
+      from this site over the air — you only need the USB cable once. Because a
+      frame sleeps almost all of the time, give it a window first: turn its
+      <em>Prevent Deep Sleep</em> switch on (or hold the wake button while it
+      boots), and it will check this site and stay up long enough to install.
+    </p>
+  </div>
+
+  <h2>Notes</h2>
+
+  <p>
+    The frame spends nearly all of its time in deep sleep, waking on a timer to
+    pull a fresh image. How often is up to you: the <em>Sleep Duration</em>
+    number entity in Home Assistant sets the wake period in minutes, and every
+    wake is a full panel refresh, so longer is kinder to the battery. If you
+    need the frame to stay awake — to read its logs or install firmware — hold
+    the wake button while it boots, or flip the <em>Prevent Deep Sleep</em>
+    switch in Home Assistant before its next wake-up.
+  </p>
+
+  <p>
+    Images come from a Stillframe server on your own network, which crops,
+    resizes and dithers pictures for the panel. Point the device at it from Home
+    Assistant after adopting.
+  </p>
+
+  <footer>
+    <p>
+      <a href="https://github.com/GoogleBot42/stillframe"
+        >GoogleBot42/stillframe</a
+      >
+      &middot; firmware built and published from
+      <a href="https://github.com/GoogleBot42/stillframe/releases"
+        >tagged releases</a
+      >.
+    </p>
+  </footer>
+</main>
+
+<script type="module">
+  // Show the currently published version on each card, read from the very same
+  // manifest the install button and the devices use. No build-time templating.
+  for (const card of document.querySelectorAll(".device")) {
+    const button = card.querySelector("esp-web-install-button");
+    const target = card.querySelector("[data-version]");
+    if (!button || !target) continue;
+    try {
+      const response = await fetch(button.getAttribute("manifest"), {
+        cache: "no-cache",
+      });
+      if (!response.ok) continue;
+      const manifest = await response.json();
+      if (manifest.version) target.textContent = `Firmware ${manifest.version}`;
+    } catch (err) {
+      // Offline or opened from disk — just leave the line blank.
+    }
+  }
+</script>
+
+</body>
+</html>

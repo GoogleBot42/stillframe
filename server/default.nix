@@ -60,12 +60,12 @@ let
   };
 
   server = buildGoModule rec {
-    pname = "dynamic-frame-server";
+    pname = "stillframe-server";
     version = "0.0.1";
 
     src = ./.;
 
-    vendorSha256 = "qr3hNJxCT8YPQntKCCPNO2yaETswziGXAd4lQELsDGg=";
+    vendorHash = "sha256-qr3hNJxCT8YPQntKCCPNO2yaETswziGXAd4lQELsDGg=";
   };
 
   # Wrap server so it has access to smartcrop in its PATH
@@ -80,8 +80,12 @@ let
       mkdir -p $out/bin
       cp ${server}/bin/* $out/bin/
 
+      # --prefix (not --set "...:$PATH"): $PATH would be expanded at BUILD time,
+      # baking the sandbox's stdenv (gcc, binutils, patchelf, make, ...) into the
+      # wrapper and therefore into the runtime closure of a network-facing
+      # daemon. smartcrop-cli is the only thing the server needs to find.
       wrapProgram $out/bin/server \
-        --set PATH "${smartcrop-cli}/bin:$PATH"
+        --prefix PATH : "${smartcrop-cli}/bin"
     '';
 
     meta.mainProgram = "server";

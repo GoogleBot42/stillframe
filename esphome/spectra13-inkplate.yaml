@@ -1,0 +1,57 @@
+# Soldered Inkplate 13 Spectra — 13.3" E Ink Spectra 6 (EL133UF1, 1600x1200)
+#
+# Board: ESP32-S3-WROOM-2-N32R16V (32MB octal flash, 16MB octal PSRAM).
+# Panel pins are fixed by the board design (Soldered Inkplate Arduino library,
+# src/boards/Inkplate13SPECTRA/pins.h). The onboard WAKE button is GPIO18.
+#
+# Not yet wired up (board also has): PCF85063A RTC (INT on GPIO2), PCAL6416A
+# I/O expander at 0x20 (SD power, battery divider enable), microSD on
+# SCK=12/MISO=13/MOSI=11/CS=10, battery voltage on GPIO1 (2:1 divider).
+
+substitutions:
+  wake_pin: GPIO18
+
+esphome:
+  name: stillframe-spectra13
+
+esp32:
+  variant: esp32s3
+  flash_size: 32MB
+  framework:
+    type: esp-idf
+    advanced:
+      # required for OTA with 32MB flash
+      enable_idf_experimental_features: true
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+packages:
+  common: !include common.yaml
+
+# The Inkplate 13 Spectra's USB-C port goes through a CH340C USB-UART bridge
+# wired to UART0, not to the ESP32-S3's native USB — so override the S3 default
+# (USB_SERIAL_JTAG) or nothing (logs, Improv provisioning) reaches the port.
+logger:
+  hardware_uart: UART0
+
+spi:
+  clk_pin: GPIO38
+  mosi_pin: GPIO40
+  miso_pin: GPIO41
+
+el133uf1:
+  id: epaper_display
+  cs_m_pin: GPIO42
+  cs_s_pin: GPIO39
+  dc_pin: GPIO14
+  reset_pin: GPIO4
+  busy_pin:
+    number: GPIO7
+    mode: INPUT_PULLUP
+  pwr_en_pin: GPIO21
+  bs0_pin: GPIO6
+  bs1_pin: GPIO5
+  # 0 = portrait, 90/270 = landscape (swap 90 <-> 270 if image is upside down)
+  rotation: 90

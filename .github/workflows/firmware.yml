@@ -1,0 +1,415 @@
+# Build the Stillframe factory firmware, publish it as a GitHub Release, and
+# deploy it to GitHub Pages. Fires only on a `vX.Y.Z` release tag.
+#
+# WHERE THIS RUNS
+#   This repository's canonical home is a private Gitea instance
+#   (git.neet.dev/zuckerberg/stillframe). The GitHub repo
+#   github.com/GoogleBot42/stillframe is a READ-ONLY DOWNSTREAM MIRROR of
+#   it: it receives every branch and tag through Gitea's push mirror, its
+#   Actions build the firmware, and its Pages site is what devices poll.
+#   Releases are cut on Gitea (`git tag vX.Y.Z && git push origin vX.Y.Z`);
+#   the mirror carries the tag here and that is the only thing that starts a
+#   build. This workflow must NEVER create commits or tags — all git data
+#   flows one way, Gitea -> GitHub. See site/README.md.
+#
+# WHY ONLY ON TAGS
+#   Publishing moves the version every frame installs, so every publish is an
+#   OTA offer to every device. Building on each push to `main` made that
+#   automatic and unreviewable; a tag is the deliberate "ship it" signal — and
+#   the tag name *is* the version (there is no VERSION file to keep in sync,
+#   nothing in the tree carries a version, CI derives it from the ref).
+#
+# WHAT IT PRODUCES
+#   https://googlebot42.github.io/stillframe/                       — installer page (site/)
+#   https://googlebot42.github.io/stillframe/firmware/<variant>/manifest.json
+#   https://googlebot42.github.io/stillframe/firmware/<variant>/<name>.factory.bin
+#   https://googlebot42.github.io/stillframe/firmware/<variant>/<name>.ota.bin
+#
+#   Those Pages URLs are STABLE — they always serve the newest stable release,
+#   which is why the `update:` component in esphome/factory/*.yaml can hard-code
+#   them. The same files are also attached to the GitHub Release for the tag, as
+#   a permanent per-version archive; devices do not use them (release asset URLs
+#   redirect through long signed links that overflow the ESPHome HTTP client's
+#   buffer).
+#
+#   The single manifest.json per variant serves two different consumers:
+#     * esp-web-tools in the browser  -> reads `builds[].parts[]` (factory bin)
+#     * the on-device `update:` / `platform: http_request` component
+#                                     -> reads `version` + `builds[].ota{path,md5}`
+#   esphome/build-action's `complete-manifest: true` output already contains
+#   both, which is why we publish it verbatim instead of hand-rolling JSON.
+#   Manifest `path` values are bare filenames, resolved relative to the manifest
+#   URL by both consumers, so renaming the build directory to
+#   `firmware/<variant>/` below is safe.
+
+name: Firmware
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual escape hatch: Actions -> Firmware -> Run workflow, and pick an
+  # existing `vX.Y.Z` **tag** as the ref (re-publish Pages, recover a half-
+  # finished run, rebuild after an ESPHome release). Dispatching from a branch
+  # is rejected by the `version` job below — there would be no version to stamp.
+  workflow_dispatch:
+
+# Least privilege by default; the release and deploy jobs widen this for
+# themselves only.
+permissions:
+  contents: read
+
+# NOTE: concurrency is deliberately scoped to the `deploy` job only (see below)
+# and NOT declared here. A workflow-level `group: pages` would serialise entire
+# runs, and GitHub keeps at most ONE pending entry per concurrency group: with
+# three tags pushed in quick succession the middle run would be cancelled
+# outright — losing its release as well as its deploy.
+
+jobs:
+  version:
+    # Resolve the version once, before five long builds, so a malformed tag
+    # fails in seconds instead of an hour.
+    name: Resolve version
+    # Gitea Actions also picks up .github/workflows/ — this guard makes sure the
+    # build only ever runs on GitHub's runners, never on the Gitea side (which
+    # has no Pages and must stay the source of truth, not a publisher). Skipping
+    # this job skips every job that `needs` it.
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      prerelease: ${{ steps.ver.outputs.prerelease }}
+    steps:
+      - name: Resolve and verify version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "::error::this workflow only runs on a release tag, but the ref is '${GITHUB_REF}'. Cut a release on Gitea (git tag vX.Y.Z && git push origin vX.Y.Z) and let the mirror carry the tag here, or re-run this dispatch against an existing tag."
+            exit 1
+          fi
+          # Matched against the tag *including* its leading `v`, so the release
+          # below is always created on a tag that already exists on the mirror —
+          # a bare `1.2.3` would make action-gh-release create the ref here, and
+          # GitHub must never originate git data.
+          #
+          # A prerelease suffix must start with `-`, matching the `case`
+          # below that decides whether to deploy to Pages. A dot-separated
+          # suffix (v1.2.3.rc1) would pass a looser regex but read as *stable*
+          # there, and would be pushed to every device as a release.
+          echo "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+            || { echo "::error::invalid tag '${GITHUB_REF_NAME}' (expected vX.Y.Z, optionally with a '-'-prefixed prerelease suffix such as v1.3.0-rc.1)"; exit 1; }
+          V="${GITHUB_REF_NAME#v}"
+          # ESPHome caps esphome.project.version at 30 characters; a longer tag
+          # would fail the build deep inside the matrix instead of here.
+          if [ "${#V}" -gt 30 ]; then
+            echo "::error::version '${V}' is ${#V} characters; ESPHome caps esphome.project.version at 30"
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V"    >> "$GITHUB_OUTPUT"
+          # Any semver prerelease suffix (e.g. 1.3.0-rc.1) marks a pre-release:
+          # published as a GitHub prerelease AND skipped for Pages, so the URL
+          # devices poll keeps serving the last stable build. Install a
+          # pre-release by hand from the release assets.
+          case "$V" in
+            *-*) echo "prerelease=true"  >> "$GITHUB_OUTPUT"; echo "Release v$V (PRE-RELEASE — not deployed to Pages)";;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT"; echo "Release v$V";;
+          esac
+
+  build:
+    name: Build ${{ matrix.variant }}
+    needs: version
+    runs-on: ubuntu-latest
+    # Generous: the ESP-IDF variant pulls a full toolchain on a cold runner.
+    timeout-minutes: 120
+    strategy:
+      # Build every variant even if one breaks, so a single bad config gives a
+      # complete picture. The release and deploy jobs still require all five.
+      fail-fast: false
+      matrix:
+        include:
+          - variant: color7-tinypico
+            build-timeout: 45
+          - variant: color7-tinys3
+            build-timeout: 45
+          - variant: grey16-tinypico
+            build-timeout: 45
+          - variant: grey16-tinys3
+            build-timeout: 45
+          # ESP32-S3 + esp-idf framework + 32MB flash: by far the heaviest build.
+          - variant: spectra13-inkplate
+            build-timeout: 90
+    env:
+      # VERSION STAMPING — CONTRACT WITH esphome/factory/*.yaml
+      #
+      # esphome/build-action has no "project version" input. The manifest's
+      # top-level `version` comes from `esphome.project.version` in the config
+      # (entrypoint.py: `config.project_version or esphome_version`).
+      #
+      # On the device, http_request_update.cpp compares the two strings
+      # *exactly*:
+      #     manifest "version"  ==  ESPHOME_PROJECT_VERSION   -> "up to date"
+      #     anything else                                     -> "update available"
+      # There is no semver parsing and no ordering. So the published manifest
+      # version and the version compiled into the binary must come from the same
+      # source (they do — both derive from `esphome.project.version`), and that
+      # value must change on every publish or devices will never update.
+      #
+      # Therefore each esphome/factory/<variant>.yaml must wire the version to a
+      # substitution that this workflow overrides:
+      #
+      #     substitutions:
+      #       firmware_version: dev          # local builds
+      #     esphome:
+      #       project:
+      #         name: googlebot42.stillframe
+      #         version: ${firmware_version}
+      #
+      # The value is the release tag with its leading `v` stripped: tag `v1.3.0`
+      # stamps `1.3.0`. Short (well under ESPHome's 30-char cap), meaningful in
+      # the Home Assistant update entity, and impossible to publish twice by
+      # accident because a tag can only be cut once.
+      FIRMWARE_VERSION: ${{ needs.version.outputs.version }}
+      # Shown in Home Assistant next to the update entity.
+      RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Build firmware
+        id: build
+        uses: esphome/build-action@v8.0.0
+        timeout-minutes: ${{ matrix.build-timeout }}
+        with:
+          # Factory configs are secret-free: no secrets.yaml is created here and
+          # none is needed. They carry dashboard_import + the http_request
+          # update component pointed at this Pages site.
+          yaml-file: esphome/factory/${{ matrix.variant }}.yaml
+          # `latest` keeps devices on current ESPHome without workflow churn.
+          # Pin to an explicit version here (>= 2026.7.0, required by
+          # build-action v8) if an upstream release ever breaks a build.
+          version: latest
+          # Emit a full esp-web-tools manifest, not just a `builds[]` fragment,
+          # because each variant gets its own directory and its own manifest.
+          complete-manifest: true
+          release-summary: "Stillframe ${{ matrix.variant }} firmware ${{ env.FIRMWARE_VERSION }}"
+          release-url: ${{ env.RELEASE_URL }}
+          # `components_source` builds the custom display drivers from THIS
+          # checkout instead of `github://GoogleBot42/stillframe@main` (the
+          # default in esphome/common.yaml). Without it the YAML would come
+          # from the tag but the C++ would be whatever happened to be on main
+          # at build time — a release could ship driver code that was never
+          # tagged, and re-running an old tag would not be reproducible. The
+          # path is resolved relative to the config's directory,
+          # esphome/factory/.
+          substitutions: |
+            firmware_version=${{ env.FIRMWARE_VERSION }}
+            components_source=../components
+
+      - name: Verify manifest
+        shell: bash
+        env:
+          BUILD_DIR: ${{ steps.build.outputs.name }}
+        run: |
+          set -euo pipefail
+          manifest="${BUILD_DIR}/manifest.json"
+          if [ ! -f "$manifest" ]; then
+            echo "::error::${manifest} was not produced by esphome/build-action"
+            exit 1
+          fi
+          echo "::group::${manifest}"
+          jq . "$manifest"
+          echo "::endgroup::"
+
+          got="$(jq -r '.version' "$manifest")"
+          if [ "$got" != "${FIRMWARE_VERSION}" ]; then
+            echo "::error file=esphome/factory/${{ matrix.variant }}.yaml::Manifest version is '${got}' but this build stamped '${FIRMWARE_VERSION}'. esphome/factory/${{ matrix.variant }}.yaml must set 'esphome.project.version: \${firmware_version}' with a 'firmware_version' substitution, so the build-time override takes effect. Without it the published version never changes and devices will never see an update (http_request update compares version strings exactly)."
+            exit 1
+          fi
+
+          # esp-web-tools needs builds[].parts[]; http_request update needs
+          # builds[].ota.path + .md5 and a chipFamily matching ESPHOME_VARIANT.
+          jq -e '
+            (.name | type == "string") and
+            (.builds | length == 1) and
+            (.builds[0].chipFamily | type == "string") and
+            (.builds[0].parts | length > 0) and
+            (.builds[0].ota.path | type == "string") and
+            (.builds[0].ota.md5 | type == "string")
+          ' "$manifest" > /dev/null || {
+            echo "::error::manifest.json is missing fields required by esp-web-tools and/or the http_request update platform"
+            exit 1
+          }
+
+          echo "${{ matrix.variant }}: version ${got}, chipFamily $(jq -r '.builds[0].chipFamily' "$manifest")" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stage published files
+        shell: bash
+        env:
+          BUILD_DIR: ${{ steps.build.outputs.name }}
+        run: |
+          set -euo pipefail
+          # Only the manifest and the binaries it references go to Pages.
+          mkdir -p publish debug
+          cp "${BUILD_DIR}/manifest.json" publish/
+          cp "${BUILD_DIR}"/*.bin publish/
+          # The ELF (debug symbols, for decoding stack traces) is large and of
+          # no use to installers — keep it as a workflow artifact instead.
+          cp "${BUILD_DIR}"/*.elf debug/
+          ls -l publish debug
+
+      - name: Upload firmware for Pages
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: firmware-${{ matrix.variant }}
+          path: publish/
+          if-no-files-found: error
+          # Long enough that "re-run failed jobs" still works a few days later:
+          # the release/deploy jobs consume these artifacts, and a same-day-only
+          # retention makes a delayed re-run fail with a confusing "artifact not
+          # found" instead of just republishing.
+          retention-days: 7
+
+      - name: Upload debug symbols
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: debug-${{ matrix.variant }}
+          path: debug/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    # All five variants must succeed: a release that ships only some of them
+    # would advertise a version most frames cannot install.
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # create the release + upload assets (never commits)
+    steps:
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: firmware-*
+          path: artifacts
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Release assets live in one flat namespace. The `.bin` names already
+          # embed the device name (stillframe-color7, …) so they are unique;
+          # manifest.json is not, hence the variant prefix. Both consumers
+          # resolve the manifest's bare `path` values relative to the manifest
+          # URL, so the rename keeps the release assets self-consistent too.
+          mkdir -p dist
+          found=0
+          for dir in artifacts/firmware-*; do
+            variant="$(basename "$dir")"
+            variant="${variant#firmware-}"
+            cp "$dir/manifest.json" "dist/${variant}.manifest.json"
+            cp "$dir"/*.bin dist/
+            found=$((found + 1))
+          done
+          if [ "$found" -ne 5 ]; then
+            echo "::error::Expected 5 firmware artifacts, found ${found}"
+            exit 1
+          fi
+          ls -l dist
+
+      - name: Publish release
+        # Creates (or, on a re-run, updates) the release on the already-mirrored
+        # tag and attaches every factory/OTA binary plus the per-variant
+        # manifests. Idempotent, so a transient failure is fixed by re-running.
+        uses: softprops/action-gh-release@v3.0.2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+  deploy:
+    name: Deploy to GitHub Pages
+    # All five must succeed: publishing a partial set would leave some devices
+    # polling a manifest that still advertises the previous version.
+    #
+    # Deliberately NOT dependent on `release`: Pages is the channel devices
+    # actually poll, so a flaky release-asset upload must not block the OTA.
+    needs: [version, build]
+    # Pre-releases build and get attached to a GitHub prerelease, but never move
+    # the Pages channel — otherwise every frame would install the release
+    # candidate, which is the opposite of what a pre-release means.
+    if: needs.version.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Pages allows one in-flight deployment, so serialise just this job. Queue
+    # rather than cancel, so a tag published mid-deploy still reaches Pages.
+    # Scoped to the job (not the workflow) on purpose: GitHub keeps only one
+    # pending entry per group, so a workflow-level group would cancel the
+    # middle of three back-to-back releases — builds, release and all.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      FIRMWARE_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v8.0.1
+        with:
+          # Without merge-multiple each artifact lands in artifacts/<name>/,
+          # i.e. artifacts/firmware-<variant>/, which we rename below.
+          pattern: firmware-*
+          path: artifacts
+
+      - name: Assemble site
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p _site/firmware
+          cp -R site/. _site/
+          found=0
+          for dir in artifacts/firmware-*; do
+            variant="$(basename "$dir")"
+            variant="${variant#firmware-}"
+            mv "$dir" "_site/firmware/${variant}"
+            found=$((found + 1))
+          done
+          if [ "$found" -ne 5 ]; then
+            echo "::error::Expected 5 firmware artifacts, found ${found}"
+            exit 1
+          fi
+          {
+            echo "### Published ${FIRMWARE_VERSION}"
+            echo
+            echo '```'
+            find _site -type f | sort
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5.0.0

@@ -9,17 +9,19 @@ import (
 	"os"
 )
 
-func ReadImage(name string) image.Image {
+func ReadImage(name string) (image.Image, error) {
 	file, err := os.Open(name)
 	if err != nil {
-		fmt.Println("Error: File could not be opened")
-		os.Exit(1)
+		return nil, fmt.Errorf("opening %q: %w", name, err)
 	}
 	defer file.Close()
 
-	img, _, _ := image.Decode(file)
+	img, _, err := image.Decode(file)
+	if err != nil {
+		return nil, fmt.Errorf("decoding %q: %w", name, err)
+	}
 
-	return img
+	return img, nil
 }
 
 func imageToRGBA(src image.Image) *image.RGBA {
@@ -43,7 +45,7 @@ func ConvertImageToColors(src image.Image) [][]Colorf {
 	img := imageToRGBA(src)
 
 	bounds := img.Bounds()
-	width, height := bounds.Max.X, bounds.Max.Y
+	width, height := bounds.Dx(), bounds.Dy()
 
 	// Initialize the 2D slice.
 	colorfImg := make([][]Colorf, height)
@@ -54,7 +56,7 @@ func ConvertImageToColors(src image.Image) [][]Colorf {
 	// Iterate over each pixel.
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
-			r, g, b, _ := img.At(x, y).RGBA()
+			r, g, b, _ := img.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
 
 			// Convert the uint32 color values to float64, normalized to [0, 1].
 			colorf := Colorf{
@@ -143,7 +145,7 @@ func clamp(value, min, max float64) float64 {
 
 func flipImage(img image.Image, vertical, horizontal bool) image.Image {
 	bounds := img.Bounds()
-	width, height := bounds.Max.X, bounds.Max.Y
+	width, height := bounds.Dx(), bounds.Dy()
 
 	newImg := image.NewRGBA(image.Rect(0, 0, width, height))
 
@@ -159,7 +161,7 @@ func flipImage(img image.Image, vertical, horizontal bool) image.Image {
 				srcY = height - y - 1
 			}
 
-			c := img.At(srcX, srcY)
+			c := img.At(bounds.Min.X+srcX, bounds.Min.Y+srcY)
 			newImg.Set(x, y, c)
 		}
 	}
