@@ -97,6 +97,8 @@ class EinkFrameDisplay {
   // write_image_data() chunks, then finish_image(true) to refresh the panel
   // (or finish_image(false) to abandon a failed transfer). Bytes past the
   // expected image size are dropped, and a short image is never shown.
+  // Chunks that arrive outside a begin/finish pair are dropped too, so a
+  // driver's buffers are only ever touched while a transfer is open.
   void begin_image();
   void write_image_data(const uint8_t *data, size_t len);
   void finish_image(bool ok);
@@ -113,9 +115,17 @@ class EinkFrameDisplay {
 
   // Prepare the panel for a new frame (power up, image-load command, ...).
   virtual void on_begin_image_() = 0;
-  // Consume one chunk. Already clamped to the remaining image size and never
-  // called once the transfer has been marked failed.
-  virtual void on_image_data_(const uint8_t *data, size_t len) = 0;
+  // Consume one chunk. Already clamped to the remaining image size, only
+  // called between begin_image() and finish_image(), and never once the
+  // transfer has been marked failed.
+  //
+  // `offset` is where this chunk starts within the image: the number of bytes
+  // already accepted for this transfer, i.e. 0 for the first chunk and the sum
+  // of all previous `len`s after that. Drivers that buffer the frame (el133uf1)
+  // write at `offset`; drivers that stream straight to the panel (epd7in3f,
+  // it8951_spi) ignore it. Passing it explicitly keeps the hook independent of
+  // when the base class updates its own byte counter.
+  virtual void on_image_data_(size_t offset, const uint8_t *data, size_t len) = 0;
   // Optional end-of-data marker, sent whether or not the transfer succeeded.
   virtual void on_image_end_() {}
   // Refresh the panel when `complete` is true, otherwise clean up only.
@@ -133,6 +143,10 @@ class EinkFrameDisplay {
   // Transfer accounting, reset by begin_image().
   size_t bytes_written_{0};
   bool transfer_failed_{false};
+  // True between begin_image() and finish_image(). Guards the drivers against
+  // chunks that arrive before a transfer was opened or after it was closed
+  // (finish_image() may have freed the buffer they would write into).
+  bool session_active_{false};
 };
 
 }  // namespace eink_frame

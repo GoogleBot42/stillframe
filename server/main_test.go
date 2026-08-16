@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"image/color"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // ===========================================================================
@@ -109,11 +112,7 @@ func TestClearImageHandlerReturnsUniformColor(t *testing.T) {
 	}
 }
 
-func TestClearImageHandlerColorIsNotWhite_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: /clearImage returns colorSpace[3] (einkimage.go:111), which is blue " +
-		"on the 7-color panel rather than white. See " +
-		"TestGenerateClearImageShouldBeWhite_KnownBug.")
-
+func TestClearImageHandlerColorIsWhite(t *testing.T) {
 	silenceStdout(t)
 	rec := postJSON(t, "/clearImage", ImageProperties{Width: 8, Height: 4, ColorSpace: epd7in3fPalette})
 	white := epd7in3fPalette[1].Code
@@ -158,52 +157,55 @@ func TestHandlersRejectNonPost(t *testing.T) {
 	}
 }
 
-// An empty color_space makes GenerateCalibrationImage divide by zero. In
-// production chi's Recoverer turns that into a 500 rather than taking the
-// process down, which is what this asserts.
-func TestCalibrationImageEmptyColorSpaceIsRecovered(t *testing.T) {
+// An empty (or missing) color_space used to divide by zero in
+// GenerateCalibrationImage and index out of range in GenerateClearImage, leaving
+// chi's Recoverer to turn an untrusted body into a 500. It is a bad request.
+func TestHandlersRejectEmptyColorSpace(t *testing.T) {
 	silenceStdout(t)
-	silenceStderr(t)
-	rec := postJSON(t, "/calibrationImage", ImageProperties{Width: 8, Height: 4, ColorSpace: ColorSpace{}})
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status %d, want 500 (a panic recovered by chi middleware)", rec.Code)
+	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
+		t.Run(ep, func(t *testing.T) {
+			rec := postJSON(t, ep, ImageProperties{Width: 8, Height: 4, ColorSpace: ColorSpace{}})
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status %d, want 400 (body %q)", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
-func TestCalibrationImageEmptyColorSpace_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: an untrusted request body with an empty (or missing) color_space " +
-		"panics the handler - GenerateCalibrationImage divides by sideLength == 0 " +
-		"(einkimage.go:91). /clearImage panics too, with index-out-of-range on " +
-		"colorSpace[3] (einkimage.go:115). Only chi's Recoverer keeps the server alive. " +
-		"The handlers should validate width/height/color_space and answer 400.")
-
+// Degenerate and absurd dimensions are rejected before they reach the pipeline,
+// where they used to divide by zero or allocate unboundedly.
+func TestHandlersRejectOutOfRangeDimensions(t *testing.T) {
 	silenceStdout(t)
-	rec := postJSON(t, "/calibrationImage", ImageProperties{Width: 8, Height: 4, ColorSpace: ColorSpace{}})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status %d, want 400", rec.Code)
+	cases := map[string]ImageProperties{
+		"zero size":       {Width: 0, Height: 0, ColorSpace: epd7in3fPalette},
+		"zero width":      {Width: 0, Height: 4, ColorSpace: epd7in3fPalette},
+		"zero height":     {Width: 8, Height: 0, ColorSpace: epd7in3fPalette},
+		"negative width":  {Width: -8, Height: 4, ColorSpace: epd7in3fPalette},
+		"negative height": {Width: 8, Height: -4, ColorSpace: epd7in3fPalette},
+		"absurd width":    {Width: maxDimension + 1, Height: 4, ColorSpace: epd7in3fPalette},
+		"absurd height":   {Width: 8, Height: maxDimension + 1, ColorSpace: epd7in3fPalette},
+	}
+	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
+		for name, props := range cases {
+			t.Run(ep+"/"+name, func(t *testing.T) {
+				rec := postJSON(t, ep, props)
+				if rec.Code != http.StatusBadRequest {
+					t.Errorf("status %d, want 400 (body %q)", rec.Code, rec.Body.String())
+				}
+			})
+		}
 	}
 }
 
-func TestClearImageEmptyColorSpaceIsRecovered(t *testing.T) {
+// The largest shipped panel must stay inside the accepted range.
+func TestHandlersAcceptTheLargestShippedGeometry(t *testing.T) {
 	silenceStdout(t)
-	silenceStderr(t)
-	rec := postJSON(t, "/clearImage", ImageProperties{Width: 8, Height: 4, ColorSpace: ColorSpace{}})
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status %d, want 500 (a panic recovered by chi middleware)", rec.Code)
-	}
-}
-
-func TestCalibrationImageZeroDimensions(t *testing.T) {
-	silenceStdout(t)
-	rec := postJSON(t, "/calibrationImage", ImageProperties{Width: 0, Height: 0, ColorSpace: epd7in3fPalette})
+	rec := postJSON(t, "/clearImage", ImageProperties{Width: 1872, Height: 1404, ColorSpace: grey16Palette()})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status %d", rec.Code)
+		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
 	}
-	if got := rec.Body.Len(); got != 0 {
-		t.Errorf("got %d bytes, want 0", got)
-	}
-	if got := rec.Header().Get("Content-Length"); got != "0" {
-		t.Errorf("Content-Length %q, want 0", got)
+	if want := 1872 * 1404 / 2; rec.Body.Len() != want {
+		t.Errorf("got %d bytes, want %d", rec.Body.Len(), want)
 	}
 }
 
@@ -342,10 +344,9 @@ func TestFetchImageHonoursHorizontalFlip(t *testing.T) {
 	}
 }
 
-// Pins the silent-failure path described in
-// TestGetBestPieceOfImageWithoutSmartcrop_KnownBug: the device gets a 200 with
-// an empty body instead of an error.
-func TestFetchImageWithoutSmartcropReturns200AndNoBytes(t *testing.T) {
+// A broken or missing cropper must not cost the frame its picture: the crop
+// falls back to a centered one and the response is a normal, full-length image.
+func TestFetchImageWithoutSmartcropStillServesAnImage(t *testing.T) {
 	silenceStdout(t)
 	imgDir := t.TempDir()
 	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
@@ -355,38 +356,23 @@ func TestFetchImageWithoutSmartcropReturns200AndNoBytes(t *testing.T) {
 		t.Skip("smartcrop-cli is still resolvable")
 	}
 
-	rec := postJSON(t, "/fetchImage", ImageProperties{Width: 16, Height: 8, ColorSpace: epd7in3fPalette})
+	const w, h = 16, 8
+	rec := postJSON(t, "/fetchImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status %d", rec.Code)
+		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
 	}
-	if rec.Body.Len() != 0 {
-		t.Fatalf("expected an empty body, got %d bytes", rec.Body.Len())
+	if want := w * h / 2; rec.Body.Len() != want {
+		t.Fatalf("got %d bytes, want %d (width*height/2)", rec.Body.Len(), want)
 	}
-}
-
-func TestFetchImageWithoutSmartcrop_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: /fetchImage answers 200 OK with Content-Length: 0 when smartcrop-cli " +
-		"is unavailable (bestcrop.go:90 discards the error). The frame has no way to tell " +
-		"a blank image from a broken server; it should be a 5xx.")
-
-	silenceStdout(t)
-	imgDir := t.TempDir()
-	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
-	withImageDir(t, imgDir)
-	t.Setenv("PATH", t.TempDir())
-
-	rec := postJSON(t, "/fetchImage", ImageProperties{Width: 16, Height: 8, ColorSpace: epd7in3fPalette})
-	if rec.Code < 500 {
-		t.Errorf("status %d, want a 5xx", rec.Code)
+	if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(rec.Body.Len()) {
+		t.Errorf("Content-Length %q, want %d", got, rec.Body.Len())
 	}
 }
 
-func TestFetchImageNonImageFile_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: a non-image file in the image directory makes ReadImage return a " +
-		"nil image.Image (image.go:20 drops the decode error); flipImage then dereferences " +
-		"it and the request panics. Recovered by chi's Recoverer in production, but the " +
-		"file is picked again at random forever. See TestReadImageUndecodable_KnownBug.")
-
+// An undecodable file in the image directory fails the one request with a 5xx.
+// It used to return a nil image.Image that flipImage dereferenced, so the
+// request panicked and only chi's Recoverer kept the server up.
+func TestFetchImageNonImageFile(t *testing.T) {
 	silenceStdout(t)
 	imgDir := t.TempDir()
 	if err := writeFile(filepath.Join(imgDir, "readme.txt"), "not an image"); err != nil {
@@ -397,7 +383,44 @@ func TestFetchImageNonImageFile_KnownBug(t *testing.T) {
 
 	rec := postJSON(t, "/fetchImage", ImageProperties{Width: 16, Height: 8, ColorSpace: epd7in3fPalette})
 	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status %d", rec.Code)
+		t.Errorf("status %d, want 500", rec.Code)
+	}
+}
+
+// An empty image directory is a server-side problem, not a bad request.
+func TestFetchImageEmptyImageDirectory(t *testing.T) {
+	silenceStdout(t)
+	withImageDir(t, t.TempDir())
+
+	rec := postJSON(t, "/fetchImage", ImageProperties{Width: 16, Height: 8, ColorSpace: epd7in3fPalette})
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status %d, want 500", rec.Code)
+	}
+}
+
+// Sub-directories in the image directory must not break the draw: fetchImage
+// used to receive "" and hand it to a ReadImage that called os.Exit(1).
+func TestFetchImageIgnoresSubdirectories(t *testing.T) {
+	silenceStdout(t)
+	imgDir := t.TempDir()
+	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
+	for _, sub := range []string{"sub1", "sub2", "sub3"} {
+		if err := os.Mkdir(filepath.Join(imgDir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withImageDir(t, imgDir)
+	stubSmartcrop(t, 0, 0, 64, 48)
+
+	const w, h = 16, 8
+	for i := 0; i < 20; i++ {
+		rec := postJSON(t, "/fetchImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("iteration %d: status %d, body %q", i, rec.Code, rec.Body.String())
+		}
+		if want := w * h / 2; rec.Body.Len() != want {
+			t.Fatalf("iteration %d: got %d bytes, want %d", i, rec.Body.Len(), want)
+		}
 	}
 }
 
@@ -438,34 +461,32 @@ func TestGetRandomFileMissingDirectory(t *testing.T) {
 	}
 }
 
-func TestGetRandomFileEmptyDirectoryPanicsToday(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected rand.Intn(0) to panic on an empty directory (current behaviour); got none")
-		}
-	}()
-	_, _ = getRandomFile(t.TempDir())
-}
-
-func TestGetRandomFileEmptyDirectory_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: main.go:33 calls rand.Intn(len(files)) without checking for an empty " +
-		"directory, so an empty image directory panics with 'invalid argument to Intn'. " +
-		"It should return an error.")
-
-	if _, err := getRandomFile(t.TempDir()); err == nil {
-		t.Error("expected an error for an empty directory")
+// rand.Intn(0) panics, so an empty directory has to be detected up front.
+func TestGetRandomFileEmptyDirectory(t *testing.T) {
+	got, err := getRandomFile(t.TempDir())
+	if err == nil {
+		t.Fatalf("expected an error for an empty directory, got %q", got)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("error should wrap os.ErrNotExist, got %v", err)
 	}
 }
 
-func TestGetRandomFileWithSubdirectories_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: main.go:33-42 draws n from the count of ALL directory entries but " +
-		"only decrements n for regular files, so whenever the image directory contains " +
-		"sub-directories the function frequently falls through the loop and returns " +
-		"os.ErrNotExist. fetchImage (main.go:101) ignores that error and passes \"\" to " +
-		"ReadImage, which calls os.Exit(1) (image.go:17) - a single stray sub-directory " +
-		"can therefore take the whole server process down. n should be drawn from the " +
-		"number of regular files.")
+// A directory containing only sub-directories has no image to serve.
+func TestGetRandomFileOnlySubdirectories(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := getRandomFile(dir); err == nil {
+		t.Errorf("expected an error when the directory holds no files, got %q", got)
+	}
+}
 
+// The draw is over the files only. Drawing over every dirent but stepping only
+// past files made the loop fall through and return os.ErrNotExist whenever the
+// image directory held sub-directories.
+func TestGetRandomFileWithSubdirectories(t *testing.T) {
 	dir := t.TempDir()
 	only := filepath.Join(dir, "only.png")
 	if err := writeFile(only, "x"); err != nil {
@@ -534,11 +555,47 @@ func TestBasicAuthAcceptsHardcodedCredentials(t *testing.T) {
 	}
 }
 
+// Documents the current posture: basicAuth is deliberately not wired into
+// newRouter, so no endpoint is authenticated. This exercises the production
+// router, so wiring auth in would fail here rather than pass silently.
 func TestRoutesAreUnauthenticated(t *testing.T) {
-	// Documents the current posture: no auth is applied to any endpoint.
 	silenceStdout(t)
-	rec := postJSON(t, "/calibrationImage", ImageProperties{Width: 8, Height: 4, ColorSpace: epd7in3fPalette})
-	if rec.Code == http.StatusUnauthorized {
-		t.Error("expected the endpoints to be unauthenticated today")
+	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
+		req := httptest.NewRequest(http.MethodPost, ep, strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		newRouter().ServeHTTP(rec, req)
+		if rec.Code == http.StatusUnauthorized {
+			t.Errorf("%s is authenticated; the endpoints are expected to be open today", ep)
+		}
+	}
+}
+
+// The routing table is the one main() serves, so a route added, removed or
+// renamed in newRouter shows up here.
+func TestRouterExposesExactlyTheThreeEndpoints(t *testing.T) {
+	want := map[string]bool{
+		"POST /fetchImage":       true,
+		"POST /calibrationImage": true,
+		"POST /clearImage":       true,
+	}
+
+	got := map[string]bool{}
+	err := chi.Walk(newRouter(), func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		got[method+" "+route] = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the router: %v", err)
+	}
+
+	for route := range want {
+		if !got[route] {
+			t.Errorf("route %q is missing from the router", route)
+		}
+	}
+	for route := range got {
+		if !want[route] {
+			t.Errorf("router exposes an unexpected route %q", route)
+		}
 	}
 }

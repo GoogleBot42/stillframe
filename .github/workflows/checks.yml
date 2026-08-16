@@ -1,0 +1,179 @@
+# Run the repository's validation suite on every push and pull request.
+#
+# WHERE THIS RUNS
+#   Same convention as firmware.yml: this repository's canonical home is a
+#   private Gitea instance (git.neet.dev/zuckerberg/picture-frame) and
+#   github.com/GoogleBot42/picture-frame is a READ-ONLY DOWNSTREAM MIRROR that
+#   receives every branch and tag. Gitea Actions also picks up
+#   .github/workflows/, so every job carries the same
+#   `github.server_url == 'https://github.com'` guard and this workflow runs on
+#   the GitHub mirror only. It never creates commits, tags or releases.
+#
+# WHAT IT COVERS
+#   nix-check         `nix flake check`, which is:
+#                       checks.build     — the Go server (buildGoModule's
+#                                          checkPhase runs `go test ./...`)
+#                       checks.einkTests — esphome/tests/run.sh, the host unit
+#                                          tests for the display logic
+#                       checks.service   — the NixOS VM test for the systemd
+#                                          service (needs KVM, see below)
+#   esphome-validate  `esphome config` for all ten device configs (the five
+#                     adoptable ones and the five factory ones), with the
+#                     `components_source` substitution pointed at the local
+#                     components directory so nothing is fetched from GitHub.
+#
+#   Deliberately *not* here: `esphome compile`. A full firmware build takes
+#   45-90 minutes per variant; that is firmware.yml's job, on release tags.
+#   `esphome config` catches config/schema/substitution breakage in seconds.
+
+name: Checks
+
+on:
+  # Every branch, but not tags: a tag push already triggers firmware.yml, which
+  # builds the real thing.
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the in-flight run redundant.
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nix-check:
+    name: nix flake check
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      # checks.service boots a NixOS VM under QEMU. GitHub-hosted ubuntu-latest
+      # runners do expose /dev/kvm, but only root can open it out of the box —
+      # this udev rule is the standard fix. Best-effort: if it ever stops
+      # working the next step notices and the job degrades instead of failing.
+      - name: Enable KVM for the NixOS VM test
+        continue-on-error: true
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Detect KVM
+        id: kvm
+        run: |
+          set -uo pipefail
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "KVM is available; the NixOS VM test will run."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "KVM is NOT available."
+          fi
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      # Free, zero-config binary cache backed by the GitHub Actions cache. Keeps
+      # repeat runs from rebuilding the Go toolchain and the NixOS VM closure.
+      - name: Set up the Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: nix flake check
+        if: steps.kvm.outputs.available == 'true'
+        run: nix flake check -L --show-trace
+
+      # Graceful degradation: without KVM the NixOS VM test would either refuse
+      # to start or crawl along under QEMU's software emulation for the whole
+      # job timeout. Evaluate everything (so a broken check still fails here),
+      # build every check except the VM test, and leave a warning annotation
+      # explaining what was skipped rather than failing the job.
+      - name: nix flake check (without the NixOS VM test)
+        if: steps.kvm.outputs.available != 'true'
+        run: |
+          set -euo pipefail
+          echo "::warning::/dev/kvm is unavailable on this runner, so checks.service (the NixOS VM test) was skipped. Every other check still ran."
+          nix flake check -L --show-trace --no-build
+          nix build -L --show-trace --no-link \
+            '.#checks.x86_64-linux.build' \
+            '.#checks.x86_64-linux.einkTests'
+          echo "checks.service (NixOS VM test) SKIPPED: no /dev/kvm" >> "$GITHUB_STEP_SUMMARY"
+
+      # A network-facing daemon must not carry a compiler in its runtime
+      # closure; server/default.nix wraps the binary with `--prefix PATH`
+      # precisely so it does not. Regressing that (e.g. back to
+      # `--set PATH "...:$PATH"`) inflates the closure from ~90 MiB to ~870 MiB.
+      - name: Check the server's runtime closure
+        run: |
+          set -euo pipefail
+          nix build -L --no-link --print-out-paths '.#server' > /tmp/server-path
+          out="$(cat /tmp/server-path)"
+          nix path-info -Sh "$out"
+          refs="$(nix-store -q --references "$out")"
+          echo "::group::runtime references"
+          echo "$refs"
+          echo "::endgroup::"
+          if echo "$refs" | grep -Eq -- '-(gcc|binutils|patchelf|gnumake)(-wrapper)?-'; then
+            echo "::error file=server/default.nix::The server's runtime closure references a build-time toolchain (gcc/binutils/patchelf/make). Check that wrapProgram uses '--prefix PATH :' and never '--set PATH \"...:\$PATH\"', which expands \$PATH at build time."
+            exit 1
+          fi
+          nix path-info -Sh "$out" >> "$GITHUB_STEP_SUMMARY"
+
+  esphome-validate:
+    name: esphome config
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Set up the Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      # Build the dev shell once so the per-config runs below are just esphome.
+      - name: Prepare the dev shell
+        run: nix develop --command esphome version
+
+      - name: Validate every device config
+        run: |
+          set -uo pipefail
+          # The configs default `components_source` to the published repo
+          # (github://GoogleBot42/picture-frame@main) so an adopted config
+          # builds anywhere. Override it to the checkout's own components so CI
+          # validates THIS commit and never reaches the network. The path is
+          # resolved relative to the directory of the config being validated,
+          # hence `components` from esphome/ and `../components` from
+          # esphome/factory/.
+          fail=0
+          for variant in color7-tinypico color7-tinys3 grey16-tinypico grey16-tinys3 spectra13-inkplate; do
+            for flavor in adoptable factory; do
+              if [ "$flavor" = "adoptable" ]; then
+                dir="esphome"; src="components"
+              else
+                dir="esphome/factory"; src="../components"
+              fi
+              echo "::group::${flavor} ${variant}"
+              if (cd "$dir" && nix develop "$GITHUB_WORKSPACE" --command \
+                    esphome -s components_source "$src" config "${variant}.yaml"); then
+                echo "- ${dir}/${variant}.yaml: valid" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "::error file=${dir}/${variant}.yaml::esphome config failed"
+                echo "- ${dir}/${variant}.yaml: **FAILED**" >> "$GITHUB_STEP_SUMMARY"
+                fail=1
+              fi
+              echo "::endgroup::"
+            done
+          done
+          exit "$fail"

@@ -68,7 +68,7 @@ class IT8951SPI : public Component,
   const char *frame_tag_() const override;
   const eink_frame::ColorSpace &get_color_space() const override { return eink_frame::GREY16_COLOR_SPACE; }
   void on_begin_image_() override;
-  void on_image_data_(const uint8_t *data, size_t len) override;
+  void on_image_data_(size_t offset, const uint8_t *data, size_t len) override;
   void on_image_end_() override;
   void on_finish_image_(bool complete) override;
 

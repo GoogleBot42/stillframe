@@ -16,6 +16,11 @@ CODEOWNERS = ["@GoogleBot42"]
 CONF_FLIP_VERTICAL = "flip_vertical"
 CONF_FLIP_HORIZONTAL = "flip_horizontal"
 
+# Upper bound on a configured panel dimension. Comfortably above every panel
+# these drivers support (the largest is 1872x1404) while keeping a typo from
+# asking the server for an image no ESP32 could ever hold.
+MAX_DIMENSION = 4096
+
 eink_frame_ns = cg.esphome_ns.namespace("eink_frame")
 EinkFrameDisplay = eink_frame_ns.class_("EinkFrameDisplay")
 
@@ -46,8 +51,12 @@ def eink_frame_schema(*, width=None, height=None):
     if width is not None or height is not None:
         schema = schema.extend(
             {
-                cv.Optional(CONF_WIDTH, default=width): cv.int_range(min=1),
-                cv.Optional(CONF_HEIGHT, default=height): cv.int_range(min=1),
+                cv.Optional(CONF_WIDTH, default=width): cv.int_range(
+                    min=1, max=MAX_DIMENSION
+                ),
+                cv.Optional(CONF_HEIGHT, default=height): cv.int_range(
+                    min=1, max=MAX_DIMENSION
+                ),
             }
         )
     return schema

@@ -46,26 +46,10 @@ func TestPackBytesIntoNibbles(t *testing.T) {
 	}
 }
 
-// packBytesIntoNibbles indexes input[x+1] unconditionally, so an odd-length
-// input panics. This locks in the *current* behaviour so a future fix is a
-// deliberate, visible change. See TestPackBytesIntoNibblesOddLength_KnownBug for
-// the behaviour that is actually wanted.
-func TestPackBytesIntoNibblesOddLengthPanicsToday(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected packBytesIntoNibbles to panic on odd-length input (current behaviour); it did not")
-		}
-	}()
-	packBytesIntoNibbles([]byte{0x1, 0x2, 0x3})
-}
-
-func TestPackBytesIntoNibblesOddLength_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: einkimage.go:122 packBytesIntoNibbles reads input[x+1] without a bounds check, " +
-		"so any odd-length input panics (index out of range). Odd-length input reaches it whenever " +
-		"width*height is odd (e.g. a 3x3 request), and every caller " +
-		"(ConvertToEInkImage, GenerateCalibrationImage, GenerateClearImage) is affected. " +
-		"It should pad the final nibble instead of panicking.")
-
+// An odd pixel count (e.g. a 3x3 request) leaves a half-full trailing byte. The
+// last pixel goes in the high nibble and the low nibble is padded with 0, so no
+// caller can be made to read out of range.
+func TestPackBytesIntoNibblesOddLengthPads(t *testing.T) {
 	got := packBytesIntoNibbles([]byte{0x1, 0x2, 0x3})
 	want := []byte{0x12, 0x30}
 	if !bytes.Equal(got, want) {
@@ -316,7 +300,10 @@ func TestConvertToEInkImageDithersMidTones(t *testing.T) {
 	}
 	// Error diffusion must preserve average intensity: the fraction of white
 	// pixels should track the gamma-corrected input value.
-	wantWhiteFraction := CorrectGamma(Colorf{190.0 / 255.0, 0, 0})[0]
+	// (190/255) ** 1.2, computed independently of CorrectGamma so the assertion
+	// is not self-referential.
+	const wantWhiteFraction = 0.70252
+
 	gotWhiteFraction := float64(white) / float64(black+white)
 	if !almostEqual(gotWhiteFraction, wantWhiteFraction, 0.06) {
 		t.Errorf("dither should average out to the source intensity: got %.3f white, want ~%.3f (black=%d white=%d)",
@@ -364,34 +351,19 @@ func TestConvertToEInkImageDitheringAffectsNeighbours(t *testing.T) {
 	}
 }
 
-func TestConvertToEInkImageOddPixelCountPanicsToday(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected a panic for an odd pixel count (current behaviour); got none")
-		}
-	}()
-	ConvertToEInkImage(gradientRGBA(3, 3), epd7in3fPalette)
-}
-
-func TestConvertToEInkImageOddPixelCount_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: a display whose width*height is odd (e.g. 3x3) panics in " +
-		"packBytesIntoNibbles (einkimage.go:128) instead of producing a padded buffer. " +
-		"ConvertToEInkImage should emit ceil(w*h/2) bytes.")
-
+// No shipped geometry has an odd pixel count, but a request for one must pad
+// rather than panic.
+func TestConvertToEInkImageOddPixelCount(t *testing.T) {
 	got := ConvertToEInkImage(gradientRGBA(3, 3), epd7in3fPalette)
 	if len(got) != 5 {
 		t.Errorf("3x3 image: got %d bytes, want 5 (ceil(9/2))", len(got))
 	}
 }
 
-func TestConvertToEInkImageSubImage_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: einkimage.go:36 and image.go:46 compute the image size as " +
-		"bounds.Max.X/bounds.Max.Y rather than bounds.Dx()/bounds.Dy(). For any image " +
-		"with a non-zero Bounds().Min - which is exactly what image.SubImage returns, " +
-		"as used in bestcrop.go:97 - the pipeline walks the wrong region and emits the " +
-		"wrong number of bytes. It happens not to bite today only because " +
-		"resize.Resize always returns an image anchored at (0,0).")
-
+// The size must come from bounds.Dx()/Dy() with reads offset by bounds.Min, so
+// that a sub-image (what bestcrop.go's SubImage call produces) is walked over
+// its own rectangle rather than from the origin.
+func TestConvertToEInkImageSubImage(t *testing.T) {
 	src := gradientRGBA(16, 16)
 	sub := src.SubImage(image.Rect(4, 4, 12, 12)) // 8x8
 	got := ConvertToEInkImage(sub, epd7in3fPalette)
@@ -404,6 +376,24 @@ func TestConvertToEInkImageSubImage_KnownBug(t *testing.T) {
 // GenerateCalibrationImage
 // ===========================================================================
 
+func mustCalibrationImage(t *testing.T, w, h int, palette ColorSpace) []byte {
+	t.Helper()
+	got, err := GenerateCalibrationImage(w, h, palette)
+	if err != nil {
+		t.Fatalf("GenerateCalibrationImage(%d, %d): %v", w, h, err)
+	}
+	return got
+}
+
+func mustClearImage(t *testing.T, w, h int, palette ColorSpace) []byte {
+	t.Helper()
+	got, err := GenerateClearImage(w, h, palette)
+	if err != nil {
+		t.Fatalf("GenerateClearImage(%d, %d): %v", w, h, err)
+	}
+	return got
+}
+
 func TestGenerateCalibrationImageFourColorGrid(t *testing.T) {
 	// 4 colors -> sideLength 2 -> a 2x2 grid of quadrants over a 4x4 image.
 	palette := ColorSpace{
@@ -412,7 +402,7 @@ func TestGenerateCalibrationImageFourColorGrid(t *testing.T) {
 		{Colorf{1, 0, 0}, 2},
 		{Colorf{0, 0, 1}, 3},
 	}
-	got := GenerateCalibrationImage(4, 4, palette)
+	got := mustCalibrationImage(t, 4, 4, palette)
 	want := []byte{
 		0x00, 0x11, // y=0: codes 0,0,1,1
 		0x00, 0x11, // y=1
@@ -426,7 +416,7 @@ func TestGenerateCalibrationImageFourColorGrid(t *testing.T) {
 
 func TestGenerateCalibrationImageSizeAndCoverage(t *testing.T) {
 	const w, h = 60, 36
-	got := GenerateCalibrationImage(w, h, epd7in3fPalette)
+	got := mustCalibrationImage(t, w, h, epd7in3fPalette)
 	if want := w * h / 2; len(got) != want {
 		t.Fatalf("got %d bytes, want %d", len(got), want)
 	}
@@ -449,7 +439,7 @@ func TestGenerateCalibrationImageSizeAndCoverage(t *testing.T) {
 // With 7 colors the grid is 3x3, so the two trailing cells are clamped onto the
 // last color rather than reading past the palette.
 func TestGenerateCalibrationImageClampsTrailingCells(t *testing.T) {
-	got := GenerateCalibrationImage(6, 6, epd7in3fPalette)
+	got := mustCalibrationImage(t, 6, 6, epd7in3fPalette)
 	// Bottom-right pixel is row 2, column 2 -> index min(6, 8) = 6 -> code 6.
 	last := got[len(got)-1]
 	if last&0xF != 6 {
@@ -464,7 +454,7 @@ func TestGenerateCalibrationImageClampsTrailingCells(t *testing.T) {
 
 func TestGenerateCalibrationImageGrey16(t *testing.T) {
 	// 16 colors -> sideLength 4.
-	got := GenerateCalibrationImage(64, 32, grey16Palette())
+	got := mustCalibrationImage(t, 64, 32, grey16Palette())
 	if want := 64 * 32 / 2; len(got) != want {
 		t.Fatalf("got %d bytes, want %d", len(got), want)
 	}
@@ -478,40 +468,27 @@ func TestGenerateCalibrationImageGrey16(t *testing.T) {
 }
 
 func TestGenerateCalibrationImageZeroSize(t *testing.T) {
-	if got := GenerateCalibrationImage(0, 0, epd7in3fPalette); got != nil {
+	if got := mustCalibrationImage(t, 0, 0, epd7in3fPalette); got != nil {
 		t.Errorf("expected nil for a 0x0 image, got %#v", got)
 	}
 }
 
-func TestGenerateCalibrationImageTinyHeightPanicsToday(t *testing.T) {
-	// height (2) < sideLength (3) makes rowSpacing 0 -> integer divide by zero.
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected a divide-by-zero panic (current behaviour); got none")
-		}
-	}()
-	GenerateCalibrationImage(6, 2, epd7in3fPalette)
-}
-
-func TestGenerateCalibrationImageTinyHeight_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: einkimage.go:91-92 compute rowSpacing/columnSpacing with integer " +
-		"division and never guard against 0. Any request whose width or height is smaller " +
-		"than ceil(sqrt(len(colorSpace))) panics with 'integer divide by zero'. " +
-		"An empty color_space array panics the same way (sideLength == 0), which is " +
-		"reachable from an untrusted HTTP body.")
-
-	if got := GenerateCalibrationImage(6, 2, epd7in3fPalette); len(got) != 6 {
+// A panel smaller than the color grid (height 2 < sideLength 3) used to divide
+// by zero; the spacings clamp to one pixel per cell instead.
+func TestGenerateCalibrationImageTinyHeight(t *testing.T) {
+	if got := mustCalibrationImage(t, 6, 2, epd7in3fPalette); len(got) != 6 {
 		t.Errorf("got %d bytes, want 6", len(got))
 	}
 }
 
-func TestGenerateCalibrationImageEmptyColorSpacePanicsToday(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected a panic for an empty color space (current behaviour); got none")
-		}
-	}()
-	GenerateCalibrationImage(8, 4, ColorSpace{})
+func TestGenerateCalibrationImageEmptyColorSpace(t *testing.T) {
+	got, err := GenerateCalibrationImage(8, 4, ColorSpace{})
+	if err == nil {
+		t.Fatalf("expected an error for an empty color space, got %#v", got)
+	}
+	if got != nil {
+		t.Errorf("expected no data alongside the error, got %#v", got)
+	}
 }
 
 // ===========================================================================
@@ -520,7 +497,7 @@ func TestGenerateCalibrationImageEmptyColorSpacePanicsToday(t *testing.T) {
 
 func TestGenerateClearImageIsUniform(t *testing.T) {
 	const w, h = 12, 6
-	got := GenerateClearImage(w, h, epd7in3fPalette)
+	got := mustClearImage(t, w, h, epd7in3fPalette)
 	if want := w * h / 2; len(got) != want {
 		t.Fatalf("got %d bytes, want %d", len(got), want)
 	}
@@ -535,47 +512,53 @@ func TestGenerateClearImageIsUniform(t *testing.T) {
 	}
 }
 
-// Current behaviour: the clear color is hard-coded to colorSpace[3].
-func TestGenerateClearImageUsesIndexThreeToday(t *testing.T) {
-	got := GenerateClearImage(4, 2, epd7in3fPalette)
-	code := epd7in3fPalette[3].Code // 3 == blue on the EPD7IN3F
-	want := code<<4 | code
-	for _, b := range got {
-		if b != want {
-			t.Fatalf("got %#x, want %#x (colorSpace[3])", b, want)
-		}
+// The clear color is the palette entry closest to white. That index differs per
+// panel (1 on the color panels, 15 on the 16-gray one), so it must be derived
+// from the palette rather than hard-coded.
+func TestGenerateClearImageIsWhite(t *testing.T) {
+	cases := []struct {
+		name    string
+		palette ColorSpace
+		want    uint8
+	}{
+		{"epd7in3f", epd7in3fPalette, 1},
+		{"el133uf1", el133uf1Palette, 1},
+		{"grey16", grey16Palette(), 15},
+		{"black and white", bwPalette, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mustClearImage(t, 4, 2, tc.palette)
+			want := tc.want<<4 | tc.want
+			for _, b := range got {
+				if b != want {
+					t.Fatalf("got %#x, want %#x (white)", b, want)
+				}
+			}
+		})
 	}
 }
 
-func TestGenerateClearImageShouldBeWhite_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: einkimage.go:111 hard-codes clearIndex = 3 while the comment right " +
-		"above it says 'Assume the first color is white'. Index 3 is not white on any " +
-		"shipped palette: EPD7IN3F[3] is blue, EL133UF1[3] is red, and IT8951[3] is 20% " +
-		"gray. /clearImage therefore paints the panel blue/red/dark-gray instead of " +
-		"clearing it. White is code 1 on the color panels and code 15 on the 16-gray panel, " +
-		"so the index must come from the palette, not a constant.")
-
-	got := GenerateClearImage(4, 2, epd7in3fPalette)
-	white := epd7in3fPalette[1].Code
-	want := white<<4 | white
-	for _, b := range got {
-		if b != want {
-			t.Fatalf("got %#x, want %#x (white)", b, want)
-		}
+// A palette with fewer than four entries used to index out of range.
+func TestGenerateClearImageSmallPalette(t *testing.T) {
+	got := mustClearImage(t, 4, 2, bwPalette)
+	if len(got) != 4 {
+		t.Fatalf("got %d bytes, want 4", len(got))
 	}
 }
 
-func TestGenerateClearImageSmallPalettePanicsToday(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected an index-out-of-range panic for a 2-color palette (current behaviour); got none")
-		}
-	}()
-	GenerateClearImage(4, 2, bwPalette)
+func TestGenerateClearImageEmptyColorSpace(t *testing.T) {
+	got, err := GenerateClearImage(8, 4, ColorSpace{})
+	if err == nil {
+		t.Fatalf("expected an error for an empty color space, got %#v", got)
+	}
+	if got != nil {
+		t.Errorf("expected no data alongside the error, got %#v", got)
+	}
 }
 
 func TestGenerateClearImageZeroSize(t *testing.T) {
-	if got := GenerateClearImage(0, 0, epd7in3fPalette); got != nil {
+	if got := mustClearImage(t, 0, 0, epd7in3fPalette); got != nil {
 		t.Errorf("expected nil for a 0x0 image, got %#v", got)
 	}
 }

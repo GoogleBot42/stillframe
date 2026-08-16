@@ -142,6 +142,12 @@ TEST(byte_count_is_two_pixels_per_byte) {
 // The server packs nibbles as one continuous stream with no per-row padding
 // (packBytesIntoNibbles in server/einkimage.go), so an odd pixel count simply
 // rounds down — rows are not byte aligned.
+//
+// This is a deliberate behaviour change for epd7in3f, which used to compute
+// (width / 2) * height (i.e. one padding nibble per odd row): for 801x481 that
+// is 192400 bytes, not the 192640 the server actually streams. The (w * h) / 2
+// math below is the fix, so the numbers here are pinned to the server, not to
+// the old driver.
 TEST(byte_count_of_odd_geometry_rounds_down) {
   CHECK_EQ_INT(192640, packed_4bpp_byte_count(801, 481));
   CHECK_EQ_INT(4, packed_4bpp_byte_count(3, 3));

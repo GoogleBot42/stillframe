@@ -63,7 +63,7 @@ class EL133UF1 : public Component,
   // as it arrives: each controller needs its half of every row, so the image is
   // buffered (in PSRAM) and split/rotated during finish_image().
   void on_begin_image_() override;
-  void on_image_data_(const uint8_t *data, size_t len) override;
+  void on_image_data_(size_t offset, const uint8_t *data, size_t len) override;
   void on_finish_image_(bool complete) override;
 
   void power_on_and_init_();

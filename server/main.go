@@ -23,25 +23,30 @@ import (
 var imageDir = "./img"
 var port = "8080"
 
+// maxDimension bounds the panel size a client may ask for. The largest shipped
+// panel is 1872x1404; anything far beyond that is a malformed or hostile body.
+const maxDimension = 10000
+
 func getRandomFile(dir string) (string, error) {
-	files, err := ioutil.ReadDir(dir)
+	entries, err := ioutil.ReadDir(dir)
 	if err != nil {
 		return "", err
 	}
 
-	rand.Seed(time.Now().UnixNano())
-	n := rand.Intn(len(files))
-
-	for _, file := range files {
-		if !file.IsDir() {
-			if n == 0 {
-				return filepath.Join(dir, file.Name()), nil
-			}
-			n--
+	// Draw only from the files: counting sub-directories would make the draw
+	// fall off the end of the list.
+	var files []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			files = append(files, filepath.Join(dir, entry.Name()))
 		}
 	}
 
-	return "", os.ErrNotExist
+	if len(files) == 0 {
+		return "", fmt.Errorf("no files in %q: %w", dir, os.ErrNotExist)
+	}
+
+	return files[rand.Intn(len(files))], nil
 }
 
 type ImageProperties struct {
@@ -52,15 +57,43 @@ type ImageProperties struct {
 	ColorSpace    ColorSpace `json:"color_space"`
 }
 
-func calibrationImage(w http.ResponseWriter, r *http.Request) {
+// decodeImageProps decodes and validates a request body, answering 400 itself
+// when either fails. The bodies come from the network, so every field that the
+// image pipeline divides by or indexes with has to be checked here.
+func decodeImageProps(w http.ResponseWriter, r *http.Request) (ImageProperties, bool) {
 	var imageProps ImageProperties
-	err := json.NewDecoder(r.Body).Decode(&imageProps)
+	if err := json.NewDecoder(r.Body).Decode(&imageProps); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return imageProps, false
+	}
+
+	if imageProps.Width < 1 || imageProps.Width > maxDimension {
+		http.Error(w, fmt.Sprintf("width must be between 1 and %d", maxDimension), http.StatusBadRequest)
+		return imageProps, false
+	}
+	if imageProps.Height < 1 || imageProps.Height > maxDimension {
+		http.Error(w, fmt.Sprintf("height must be between 1 and %d", maxDimension), http.StatusBadRequest)
+		return imageProps, false
+	}
+	if len(imageProps.ColorSpace) == 0 {
+		http.Error(w, "color_space must not be empty", http.StatusBadRequest)
+		return imageProps, false
+	}
+
+	return imageProps, true
+}
+
+func calibrationImage(w http.ResponseWriter, r *http.Request) {
+	imageProps, ok := decodeImageProps(w, r)
+	if !ok {
+		return
+	}
+
+	data, err := GenerateCalibrationImage(imageProps.Width, imageProps.Height, imageProps.ColorSpace)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	data := GenerateCalibrationImage(imageProps.Width, imageProps.Height, imageProps.ColorSpace)
 
 	fmt.Printf("Bytes to send: %+v\n", len(data))
 
@@ -69,14 +102,16 @@ func calibrationImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func clearImage(w http.ResponseWriter, r *http.Request) {
-	var imageProps ImageProperties
-	err := json.NewDecoder(r.Body).Decode(&imageProps)
+	imageProps, ok := decodeImageProps(w, r)
+	if !ok {
+		return
+	}
+
+	data, err := GenerateClearImage(imageProps.Width, imageProps.Height, imageProps.ColorSpace)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	data := GenerateClearImage(imageProps.Width, imageProps.Height, imageProps.ColorSpace)
 
 	fmt.Printf("Bytes to send: %+v\n", len(data))
 
@@ -85,10 +120,8 @@ func clearImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func fetchImage(w http.ResponseWriter, r *http.Request) {
-	var imageProps ImageProperties
-	err := json.NewDecoder(r.Body).Decode(&imageProps)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	imageProps, ok := decodeImageProps(w, r)
+	if !ok {
 		return
 	}
 
@@ -98,10 +131,20 @@ func fetchImage(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Color code: %d, RGB: %v\n", color.Code, color.Color)
 	}
 
-	randomImgFile, _ := getRandomFile(imageDir)
+	randomImgFile, err := getRandomFile(imageDir)
+	if err != nil {
+		log.Printf("picking an image from %q: %v", imageDir, err)
+		http.Error(w, "no image available", http.StatusInternalServerError)
+		return
+	}
 	fmt.Println("Serving random image file:", randomImgFile)
 
-	img := ReadImage(randomImgFile)
+	img, err := ReadImage(randomImgFile)
+	if err != nil {
+		log.Printf("reading image: %v", err)
+		http.Error(w, "the selected image could not be read", http.StatusInternalServerError)
+		return
+	}
 
 	flippedImage := flipImage(img, imageProps.FlipVertical, imageProps.FlipHorizonal)
 	bestCrop := GetBestPieceOfImage(imageProps.Width, imageProps.Height, flippedImage)
@@ -124,17 +167,9 @@ func basicAuth(next http.Handler) http.Handler {
 	})
 }
 
-func main() {
-	if len(os.Args) > 1 {
-		port = os.Args[1]
-	}
-	fmt.Println("Starting on port: ", port)
-
-	if len(os.Args) > 2 {
-		imageDir = os.Args[2]
-	}
-	fmt.Println("Choosing images from: ", imageDir)
-
+// newRouter builds the server's routing table. main() and the tests both use it
+// so that route or middleware drift is caught by the tests.
+func newRouter() *chi.Mux {
 	router := chi.NewRouter()
 
 	router.Use(middleware.RequestID)
@@ -148,6 +183,25 @@ func main() {
 		r.Post("/calibrationImage", calibrationImage)
 		r.Post("/clearImage", clearImage)
 	})
+
+	return router
+}
+
+func main() {
+	if len(os.Args) > 1 {
+		port = os.Args[1]
+	}
+	fmt.Println("Starting on port: ", port)
+
+	if len(os.Args) > 2 {
+		imageDir = os.Args[2]
+	}
+	fmt.Println("Choosing images from: ", imageDir)
+
+	// Seed once at startup rather than on every draw.
+	rand.Seed(time.Now().UnixNano())
+
+	router := newRouter()
 
 	fmt.Println("Started server")
 

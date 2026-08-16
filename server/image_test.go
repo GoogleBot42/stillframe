@@ -1,10 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -227,19 +231,19 @@ func TestConvertImageToColorsRangeIsUnitInterval(t *testing.T) {
 	}
 }
 
-func TestConvertImageToColorsSubImage_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: image.go:46 uses bounds.Max.X/bounds.Max.Y as the width/height and " +
-		"then indexes from (0,0), so any image whose Bounds().Min is non-zero (e.g. the " +
-		"result of image.SubImage, which bestcrop.go:97 produces) is read from the wrong " +
-		"region and allocated at the wrong size. It should use bounds.Dx()/bounds.Dy() and " +
-		"offset reads by bounds.Min.")
-
+// An image whose Bounds().Min is non-zero - exactly what image.SubImage returns,
+// as bestcrop.go produces - must be sized from Dx()/Dy() and read with the Min
+// offset applied, not indexed from (0,0).
+func TestConvertImageToColorsSubImage(t *testing.T) {
 	src := gradientRGBA(8, 8)
 	sub := src.SubImage(image.Rect(2, 2, 6, 6)).(*image.RGBA) // 4x4
 	got := ConvertImageToColors(sub)
 	if len(got) != 4 || len(got[0]) != 4 {
 		t.Fatalf("got a %dx%d grid, want 4x4", len(got), len(got[0]))
 	}
+	// Grid cell (0,0) must be the sub-image's own top-left pixel, i.e. (2,2).
+	want := ConvertImageToColors(src)[2][2]
+	assertColorf(t, got[0][0], want, 1e-12, "sub-image origin should map to grid (0,0)")
 }
 
 // ===========================================================================
@@ -349,18 +353,18 @@ func TestFlipImageDoesNotMutateSource(t *testing.T) {
 	}
 }
 
-func TestFlipImageNonZeroOrigin_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: image.go:146 uses bounds.Max.X/bounds.Max.Y as the size and then " +
-		"reads img.At(srcX, srcY) with srcX/srcY derived from a 0-based loop, so an image " +
-		"whose Bounds().Min is non-zero is both mis-sized and read outside its own " +
-		"rectangle (At() returns zero pixels there). Not currently triggered because " +
-		"ReadImage always decodes to an origin-anchored image.")
-
+// An image anchored away from the origin must be sized from Dx()/Dy() and read
+// inside its own rectangle. ReadImage always decodes origin-anchored images, but
+// a sub-image is not.
+func TestFlipImageNonZeroOrigin(t *testing.T) {
 	src := image.NewRGBA(image.Rect(3, 3, 7, 6)) // 4x3 at (3,3)
 	src.SetRGBA(3, 3, color.RGBA{1, 2, 3, 255})
 	got := flipImage(src, false, false)
 	if got.Bounds().Dx() != 4 || got.Bounds().Dy() != 3 {
 		t.Fatalf("got %v, want a 4x3 image", got.Bounds())
+	}
+	if c := got.At(0, 0).(color.RGBA); c.R != 1 || c.G != 2 || c.B != 3 {
+		t.Errorf("top-left pixel %v, want the source's (3,3) pixel {1 2 3 255}", c)
 	}
 }
 
@@ -373,9 +377,9 @@ func TestReadImagePNG(t *testing.T) {
 	src := gradientRGBA(6, 4)
 	path := writeTempPNG(t, dir, "a.png", src)
 
-	got := ReadImage(path)
-	if got == nil {
-		t.Fatal("ReadImage returned nil")
+	got, err := ReadImage(path)
+	if err != nil {
+		t.Fatalf("ReadImage: %v", err)
 	}
 	if got.Bounds() != image.Rect(0, 0, 6, 4) {
 		t.Fatalf("got bounds %v, want (0,0)-(6,4)", got.Bounds())
@@ -394,9 +398,9 @@ func TestReadImagePNG(t *testing.T) {
 func TestReadImageJPEG(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTempJPEG(t, dir, "a.jpg", solidRGBA(8, 8, color.RGBA{200, 100, 50, 255}))
-	got := ReadImage(path)
-	if got == nil {
-		t.Fatal("ReadImage returned nil for a JPEG")
+	got, err := ReadImage(path)
+	if err != nil {
+		t.Fatalf("ReadImage: %v", err)
 	}
 	if got.Bounds().Dx() != 8 || got.Bounds().Dy() != 8 {
 		t.Fatalf("got %v, want an 8x8 image", got.Bounds())
@@ -406,42 +410,47 @@ func TestReadImageJPEG(t *testing.T) {
 func TestReadImageGIF(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTempGIF(t, dir, "a.gif", solidRGBA(8, 8, color.RGBA{0, 0, 255, 255}))
-	got := ReadImage(path)
-	if got == nil {
-		t.Fatal("ReadImage returned nil for a GIF")
+	got, err := ReadImage(path)
+	if err != nil {
+		t.Fatalf("ReadImage: %v", err)
 	}
 	if got.Bounds().Dx() != 8 || got.Bounds().Dy() != 8 {
 		t.Fatalf("got %v, want an 8x8 image", got.Bounds())
 	}
 }
 
-// ReadImage swallows the decode error and returns a nil image.Image for a file
-// that is not a supported image. Every caller then panics on the nil interface.
-func TestReadImageUndecodableReturnsNil(t *testing.T) {
+// A decode failure has to be surfaced: a nil image.Image would be dereferenced
+// by the very next stage of the pipeline.
+func TestReadImageUndecodable(t *testing.T) {
 	dir := t.TempDir()
-	bad := dir + "/notanimage.txt"
+	bad := filepath.Join(dir, "notanimage.txt")
 	if err := writeFile(bad, "this is not an image"); err != nil {
 		t.Fatal(err)
 	}
-	if got := ReadImage(bad); got != nil {
-		t.Errorf("expected nil for an undecodable file, got %v", got.Bounds())
+
+	got, err := ReadImage(bad)
+	if err == nil {
+		t.Fatal("expected an error for an undecodable file")
+	}
+	if got != nil {
+		t.Errorf("expected no image alongside the error, got %v", got.Bounds())
+	}
+	if !strings.Contains(err.Error(), "notanimage.txt") {
+		t.Errorf("error %q should name the offending file", err)
 	}
 }
 
-func TestReadImageUndecodable_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: image.go:20 discards the error from image.Decode and returns a nil " +
-		"image.Image. fetchImage (main.go:104) passes that straight into flipImage, which " +
-		"panics with a nil-pointer dereference on any non-image file that happens to be in " +
-		"the image directory (e.g. a stray .txt or a partially written upload). " +
-		"ReadImage should return (image.Image, error). Related: image.go:17 calls " +
-		"os.Exit(1) when the file cannot be opened, which kills the whole HTTP server " +
-		"instead of failing one request - and is why the open-failure path cannot be tested.")
-
-	dir := t.TempDir()
-	bad := dir + "/notanimage.txt"
-	if err := writeFile(bad, "this is not an image"); err != nil {
-		t.Fatal(err)
+// A file that cannot be opened must fail the one request, not the process:
+// ReadImage used to call os.Exit(1) here.
+func TestReadImageMissingFile(t *testing.T) {
+	got, err := ReadImage(filepath.Join(t.TempDir(), "does-not-exist.png"))
+	if err == nil {
+		t.Fatal("expected an error for a missing file")
 	}
-	// The intended behaviour: a decode failure is surfaced, not silently nil.
-	t.Fatalf("unreachable: ReadImage has no error return")
+	if got != nil {
+		t.Errorf("expected no image alongside the error, got %v", got.Bounds())
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("error should wrap os.ErrNotExist, got %v", err)
+	}
 }

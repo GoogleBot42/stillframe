@@ -8,6 +8,8 @@ import (
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"io"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -16,15 +18,23 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 )
+
+// TestMain silences the standard logger: chi's Logger middleware and the
+// handlers' own diagnostics would otherwise bury the test output.
+func TestMain(m *testing.M) {
+	log.SetOutput(io.Discard)
+	os.Exit(m.Run())
+}
 
 // ---------------------------------------------------------------------------
 // Palettes
 //
-// These mirror the color spaces the real firmware sends (see
-// esphome/components/*/*.cpp -> get_image_request_body()). Keeping them in sync
-// means the tests exercise the same data the server actually receives.
+// These mirror the color spaces the real firmware sends (the palettes are
+// declared per driver and serialised by
+// esphome/components/eink_frame/eink_frame.cpp -> get_image_request_body()).
+// Keeping them in sync means the tests exercise the same data the server
+// actually receives.
 // ---------------------------------------------------------------------------
 
 // epd7in3fPalette is the 7-color Waveshare EPD7IN3F color space.
@@ -66,8 +76,9 @@ var bwPalette = ColorSpace{
 	{Colorf{1, 1, 1}, 1},
 }
 
-// firmwareRequestBody is the exact JSON the EPD7IN3F driver sends, copied from
-// esphome/components/epd7in3f/epd7in3f.cpp. Used to pin the wire format.
+// firmwareRequestBody is the exact JSON the EPD7IN3F driver sends: the palette
+// comes from esphome/components/epd7in3f/, serialised by
+// esphome/components/eink_frame/eink_frame.cpp. Used to pin the wire format.
 const firmwareRequestBody = `{"width":800,"height":480,"flip_vertical":false,"flip_horizonal":true,` +
 	`"color_space":[` +
 	`{"color_code":0,"rgb_color":[0,0,0]},` +
@@ -248,8 +259,8 @@ func stubSmartcropRaw(t *testing.T, stdout string, exitCode int) *smartcropStub 
 		t.Fatalf("write payload: %v", err)
 	}
 	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$*\" >> " + argsLog + "\n" +
-		"cat " + payload + "\n" +
+		"printf '%s\\n' \"$*\" >> '" + argsLog + "'\n" +
+		"cat '" + payload + "'\n" +
 		"exit " + strconv.Itoa(exitCode) + "\n"
 	bin := filepath.Join(dir, "smartcrop-cli")
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
@@ -276,20 +287,11 @@ func (s *smartcropStub) recordedArgs(t *testing.T) []string {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-// newTestRouter mirrors the routing set up in main(). main() is not factored
-// into a testable constructor, so the routes are re-declared here. Recoverer is
-// included because several handlers can panic on degenerate input (see the
-// known-bug tests), and production behaviour for those is a 500 from Recoverer.
+// newTestRouter serves the production router, middleware and all, so that route
+// or middleware drift is a test failure rather than something the tests
+// re-declare for themselves.
 func newTestRouter() *chi.Mux {
-	router := chi.NewRouter()
-	router.Use(middleware.RequestID)
-	router.Use(middleware.Recoverer)
-	router.Group(func(r chi.Router) {
-		r.Post("/fetchImage", fetchImage)
-		r.Post("/calibrationImage", calibrationImage)
-		r.Post("/clearImage", clearImage)
-	})
-	return router
+	return newRouter()
 }
 
 func decodeJSON(body string, v interface{}) error {
@@ -326,22 +328,6 @@ func silenceStdout(t *testing.T) {
 	os.Stdout = devnull
 	t.Cleanup(func() {
 		os.Stdout = old
-		devnull.Close()
-	})
-}
-
-// silenceStderr redirects os.Stderr; chi's Recoverer dumps a pretty stack trace
-// there for every recovered panic, and several tests deliberately trigger one.
-func silenceStderr(t *testing.T) {
-	t.Helper()
-	old := os.Stderr
-	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		return
-	}
-	os.Stderr = devnull
-	t.Cleanup(func() {
-		os.Stderr = old
 		devnull.Close()
 	})
 }

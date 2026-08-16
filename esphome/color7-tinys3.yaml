@@ -3,6 +3,13 @@
 substitutions:
   # GPIO25 does not exist on the ESP32-S3; use the boot button (GPIO0) as the
   # wake button, or change to another RTC-capable pin (GPIO0-21) with a button.
+  #
+  # CAVEAT (unverified on hardware): GPIO0 is the S3's BOOT strapping pin. It
+  # is sampled at every reset, including the one that ends a deep sleep, so
+  # holding it down across a timer wake-up may drop the chip into the ROM
+  # download loader instead of running the firmware. If the "hold the wake
+  # button through a reset to open an OTA window" trick misbehaves here, wire
+  # the button to a non-strapping RTC pin and set wake_pin to that instead.
   wake_pin: GPIO0
 
 esphome:

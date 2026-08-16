@@ -105,7 +105,14 @@ void EL133UF1::on_begin_image_() {
   power_on_and_init_();
 }
 
-void EL133UF1::on_image_data_(const uint8_t *data, size_t len) { memcpy(buffer_ + this->bytes_written_, data, len); }
+void EL133UF1::on_image_data_(size_t offset, const uint8_t *data, size_t len) {
+  // The base class only calls this between begin_image() and finish_image(),
+  // so the buffer normally exists; the check is a cheap belt-and-braces guard
+  // against ever memcpying through the freed pointer.
+  if (buffer_ == nullptr)
+    return;
+  memcpy(buffer_ + offset, data, len);
+}
 
 void EL133UF1::on_finish_image_(bool complete) {
   if (complete) {

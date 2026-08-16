@@ -338,9 +338,12 @@
 
   <div class="note" style="margin-top: 1.5rem">
     <p>
-      <strong>Updates are automatic.</strong> Once installed, each frame checks
-      this site for new firmware and installs it over Wi-Fi on its own. You only
-      need the USB cable once.
+      <strong>Updates come over Wi-Fi.</strong> Once adopted, each frame gets a
+      <em>Firmware</em> entity in Home Assistant that installs new releases
+      from this site over the air — you only need the USB cable once. Because a
+      frame sleeps almost all of the time, give it a window first: turn its
+      <em>Prevent Deep Sleep</em> switch on (or hold the wake button while it
+      boots), and it will check this site and stay up long enough to install.
     </p>
   </div>
 
@@ -348,10 +351,12 @@
 
   <p>
     The frame spends nearly all of its time in deep sleep, waking on a timer to
-    pull a fresh image and again to look for firmware updates. If you need it to
-    stay awake — to check logs, say — hold the wake button on boot, or flip the
-    <em>Prevent Deep Sleep</em> switch in Home Assistant before its next
-    wake-up.
+    pull a fresh image. How often is up to you: the <em>Sleep Duration</em>
+    number entity in Home Assistant sets the wake period in minutes, and every
+    wake is a full panel refresh, so longer is kinder to the battery. If you
+    need the frame to stay awake — to read its logs or install firmware — hold
+    the wake button while it boots, or flip the <em>Prevent Deep Sleep</em>
+    switch in Home Assistant before its next wake-up.
   </p>
 
   <p>

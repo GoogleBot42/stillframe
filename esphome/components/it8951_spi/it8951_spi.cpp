@@ -67,7 +67,9 @@ void IT8951SPI::on_begin_image_() {
   lcd_send_cmd_arg_(IT8951_TCON_LD_IMG_AREA, args, 5);
 }
 
-void IT8951SPI::on_image_data_(const uint8_t *data, size_t len) {
+// The controller keeps its own write pointer inside the loaded image area, so
+// the offset within the image is not needed here.
+void IT8951SPI::on_image_data_(size_t /*offset*/, const uint8_t *data, size_t len) {
   uint8_t burst[BURST_SIZE];
   packer_.feed(data, len, burst, BURST_SIZE, [this](const uint8_t *out, size_t out_len) {
     this->write_burst_(out, out_len);

@@ -128,7 +128,9 @@ void EPD7IN3F::on_begin_image_() {
   send_command_(0x10);  // start data transmission
 }
 
-void EPD7IN3F::on_image_data_(const uint8_t *data, size_t len) {
+// Data is streamed straight into the panel's own pointer, so the offset within
+// the image is not needed here.
+void EPD7IN3F::on_image_data_(size_t /*offset*/, const uint8_t *data, size_t len) {
   dc_pin_->digital_write(true);
   this->enable();
   this->write_array(data, len);

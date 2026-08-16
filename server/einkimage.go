@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"image"
 	"math"
 
@@ -31,9 +32,28 @@ func ditherFloydSteinberg(image [][]Colorf, x int, y int, color Colorf) {
 	ditherPixel(x+1, y+1, multColor(color, 1.0/16.0))
 }
 
+// nearestPaletteColor returns the color space entry that is perceptually
+// closest (CIEDE2000) to target. An empty color space yields black/code 0.
+func nearestPaletteColor(colorSpace ColorSpace, target Colorf) (uint8, Colorf) {
+	minDist := math.MaxFloat64
+	bestColorCode := uint8(0x0)
+	bestColor := Colorf{0, 0, 0}
+
+	for _, def := range colorSpace {
+		dist := ciede2000.Diff(convertToRGBA(target), convertToRGBA(def.Color))
+		if dist < minDist {
+			minDist = dist
+			bestColorCode = def.Code
+			bestColor = def.Color
+		}
+	}
+
+	return bestColorCode, bestColor
+}
+
 func ConvertToEInkImage(src image.Image, colorSpace ColorSpace) []byte {
 	bounds := src.Bounds()
-	width, height := bounds.Max.X, bounds.Max.Y
+	width, height := bounds.Dx(), bounds.Dy()
 
 	image := ConvertImageToColors(src)
 
@@ -43,19 +63,9 @@ func ConvertToEInkImage(src image.Image, colorSpace ColorSpace) []byte {
 		for x := 0; x < width; x++ {
 			// find closest color
 			imageColor := CorrectGamma(image[y][x])
-			minDist := math.MaxFloat64
-			bestColorCode := uint8(0x0)
-			bestColor := Colorf{0, 0, 0}
-			for _, def := range colorSpace {
-				dist := ciede2000.Diff(convertToRGBA(imageColor), convertToRGBA(def.Color))
-				if dist < minDist {
-					minDist = dist
-					bestColorCode = def.Code
-					bestColor = def.Color
-				}
-			}
+			bestColorCode, bestColor := nearestPaletteColor(colorSpace, imageColor)
 
-			einkImage = append(einkImage, byte(bestColorCode))
+			einkImage = append(einkImage, bestColorCode)
 
 			// dither the remaining color using Floyd-Steinberg to create the illusion of shading
 			diff := subtractColorf(imageColor, bestColor)
@@ -76,10 +86,17 @@ func min(a, b int) int {
 	return b
 }
 
-func GenerateCalibrationImage(width, height int, colorSpace ColorSpace) []byte {
+// errEmptyColorSpace is returned when a request carries no color space; the
+// callers cannot pick any color code without one.
+var errEmptyColorSpace = errors.New("color space is empty")
+
+func GenerateCalibrationImage(width, height int, colorSpace ColorSpace) ([]byte, error) {
 	var einkImage []byte
 
 	colorCount := len(colorSpace)
+	if colorCount == 0 {
+		return nil, errEmptyColorSpace
+	}
 
 	// calculate number of rows and columns (sideLength)
 	sideLengthFloat := math.Sqrt(float64(colorCount))
@@ -88,8 +105,16 @@ func GenerateCalibrationImage(width, height int, colorSpace ColorSpace) []byte {
 		sideLength = sideLength + 1
 	}
 
+	// A panel smaller than the grid gives a spacing of 0, which would divide by
+	// zero below; one pixel per cell is the best that fits.
 	rowSpacing := height / sideLength
+	if rowSpacing < 1 {
+		rowSpacing = 1
+	}
 	columnSpacing := width / sideLength
+	if columnSpacing < 1 {
+		columnSpacing = 1
+	}
 
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
@@ -100,32 +125,40 @@ func GenerateCalibrationImage(width, height int, colorSpace ColorSpace) []byte {
 		}
 	}
 
-	return packBytesIntoNibbles(einkImage)
+	return packBytesIntoNibbles(einkImage), nil
 }
 
-func GenerateClearImage(width, height int, colorSpace ColorSpace) []byte {
+func GenerateClearImage(width, height int, colorSpace ColorSpace) ([]byte, error) {
 	var einkImage []byte
 
-	// Assume the first color is white
-	// What really matters is that the color is the same for the enitre image
-	clearIndex := 3
+	if len(colorSpace) == 0 {
+		return nil, errEmptyColorSpace
+	}
+
+	// Clear to whichever entry of the panel's own palette is closest to white.
+	// The index differs per panel (1 on the color panels, 15 on the 16-gray
+	// one), so it has to come from the palette rather than a constant.
+	clearCode, _ := nearestPaletteColor(colorSpace, Colorf{1, 1, 1})
 
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
-			einkImage = append(einkImage, colorSpace[clearIndex].Code)
+			einkImage = append(einkImage, clearCode)
 		}
 	}
 
-	return packBytesIntoNibbles(einkImage)
+	return packBytesIntoNibbles(einkImage), nil
 }
 
 func packBytesIntoNibbles(input []byte) []byte {
-	// input length must divisible by 2
-
 	var output []byte
 
 	for x := 0; x < len(input); x += 2 {
-		output = append(output, (input[x]<<4)|input[x+1])
+		// An odd pixel count leaves a half-full byte; pad the low nibble.
+		var low byte
+		if x+1 < len(input) {
+			low = input[x+1]
+		}
+		output = append(output, (input[x]<<4)|low)
 	}
 
 	return output

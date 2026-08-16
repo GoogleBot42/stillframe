@@ -13,8 +13,8 @@
 #   flows one way, Gitea -> GitHub. See site/README.md.
 #
 # WHY ONLY ON TAGS
-#   Publishing moves the version every frame polls for, so every publish is an
-#   OTA push to every device. Building on each push to `main` made that
+#   Publishing moves the version every frame installs, so every publish is an
+#   OTA offer to every device. Building on each push to `main` made that
 #   automatic and unreviewable; a tag is the deliberate "ship it" signal — and
 #   the tag name *is* the version (there is no VERSION file to keep in sync,
 #   nothing in the tree carries a version, CI derives it from the ref).
@@ -59,11 +59,11 @@ on:
 permissions:
   contents: read
 
-# Pages allows one in-flight deployment. Queue rather than cancel so a tag
-# pushed mid-build still gets published.
-concurrency:
-  group: pages
-  cancel-in-progress: false
+# NOTE: concurrency is deliberately scoped to the `deploy` job only (see below)
+# and NOT declared here. A workflow-level `group: pages` would serialise entire
+# runs, and GitHub keeps at most ONE pending entry per concurrency group: with
+# three tags pushed in quick succession the middle run would be cancelled
+# outright — losing its release as well as its deploy.
 
 jobs:
   version:
@@ -95,8 +95,13 @@ jobs:
           # below is always created on a tag that already exists on the mirror —
           # a bare `1.2.3` would make action-gh-release create the ref here, and
           # GitHub must never originate git data.
-          echo "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$' \
-            || { echo "::error::invalid tag '${GITHUB_REF_NAME}' (expected vX.Y.Z, optionally with a prerelease suffix such as v1.3.0-rc.1)"; exit 1; }
+          #
+          # A prerelease suffix must start with `-`, matching the `case`
+          # below that decides whether to deploy to Pages. A dot-separated
+          # suffix (v1.2.3.rc1) would pass a looser regex but read as *stable*
+          # there, and would be pushed to every device as a release.
+          echo "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+            || { echo "::error::invalid tag '${GITHUB_REF_NAME}' (expected vX.Y.Z, optionally with a '-'-prefixed prerelease suffix such as v1.3.0-rc.1)"; exit 1; }
           V="${GITHUB_REF_NAME#v}"
           # ESPHome caps esphome.project.version at 30 characters; a longer tag
           # would fail the build deep inside the matrix instead of here.
@@ -193,8 +198,17 @@ jobs:
           complete-manifest: true
           release-summary: "DynamicFrame ${{ matrix.variant }} firmware ${{ env.FIRMWARE_VERSION }}"
           release-url: ${{ env.RELEASE_URL }}
+          # `components_source` builds the custom display drivers from THIS
+          # checkout instead of `github://GoogleBot42/picture-frame@main` (the
+          # default in esphome/common.yaml). Without it the YAML would come
+          # from the tag but the C++ would be whatever happened to be on main
+          # at build time — a release could ship driver code that was never
+          # tagged, and re-running an old tag would not be reproducible. The
+          # path is resolved relative to the config's directory,
+          # esphome/factory/.
           substitutions: |
             firmware_version=${{ env.FIRMWARE_VERSION }}
+            components_source=../components
 
       - name: Verify manifest
         shell: bash
@@ -254,7 +268,11 @@ jobs:
           name: firmware-${{ matrix.variant }}
           path: publish/
           if-no-files-found: error
-          retention-days: 1
+          # Long enough that "re-run failed jobs" still works a few days later:
+          # the release/deploy jobs consume these artifacts, and a same-day-only
+          # retention makes a delayed re-run fail with a confusing "artifact not
+          # found" instead of just republishing.
+          retention-days: 7
 
       - name: Upload debug symbols
         uses: actions/upload-artifact@v7.0.1
@@ -332,6 +350,14 @@ jobs:
     if: needs.version.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Pages allows one in-flight deployment, so serialise just this job. Queue
+    # rather than cancel, so a tag published mid-deploy still reaches Pages.
+    # Scoped to the job (not the workflow) on purpose: GitHub keeps only one
+    # pending entry per group, so a workflow-level group would cancel the
+    # middle of three back-to-back releases — builds, release and all.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     permissions:
       contents: read
       pages: write

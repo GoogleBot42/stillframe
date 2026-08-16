@@ -12,7 +12,7 @@ DynamicFrame is an e-ink picture frame system with two components:
 
 ```bash
 nix build .#server                        # Build Go server
-nix flake check                           # Run all checks (build + NixOS service test)
+nix flake check                           # Run all checks (server build+tests, eink C++ tests, NixOS service test)
 nix develop                               # Enter dev shell (Go, Python3, ESPHome)
 ```
 
@@ -20,22 +20,22 @@ nix develop                               # Enter dev shell (Go, Python3, ESPHom
 
 Run these from the `esphome/` directory (inside `nix develop`, which ships a current ESPHome). There are no secrets — nothing needs to be filled in before building.
 
-```bash
-esphome config color7-tinypico.yaml             # Validate the adoptable config
-esphome config factory/color7-tinypico.yaml     # Validate the factory (CI) build
-esphome compile factory/color7-tinypico.yaml    # Build the public firmware
-esphome run color7-tinypico.yaml --device <IP>  # OTA flash a device you own
-esphome logs color7-tinypico.yaml               # View logs (when device is awake)
-```
-
-Replace `color7-tinypico` with `grey16-tinypico`, `color7-tinys3`, `grey16-tinys3`, or `spectra13-inkplate` for other variants.
-
-Local driver development (build against `esphome/components/` instead of the published repo):
+Always pass `-s components_source <path to esphome/components>`. `common.yaml` defaults `components_source` to `github://GoogleBot42/picture-frame@main`, which ESPHome clones at build time — so without the override every command below depends on the public GitHub mirror existing and being current, and fails outright until it does. The override also guarantees you are validating the drivers in your working tree.
 
 ```bash
-esphome run dev.yaml                                          # edit the include in dev.yaml to pick a variant
-esphome -s components_source components run color7-tinys3.yaml  # same override, any variant, no file edit
+# from esphome/
+esphome -s components_source components config color7-tinypico.yaml            # Validate the adoptable config
+esphome -s components_source components run color7-tinypico.yaml --device <IP> # OTA flash a device you own
+esphome -s components_source components logs color7-tinypico.yaml              # View logs (when device is awake)
+
+# from esphome/factory/ — the path is relative to the config being built
+esphome -s components_source ../components config color7-tinypico.yaml         # Validate the factory (CI) build
+esphome -s components_source ../components compile color7-tinypico.yaml        # Build the public firmware
 ```
+
+Dropping `-s components_source …` (plain `esphome config color7-tinypico.yaml`) is what an *adopted* config does in a user's ESPHome dashboard; it needs the published mirror. CI builds the factory configs with `components_source=../components` for the same reason as above.
+
+Replace `color7-tinypico` with `grey16-tinypico`, `color7-tinys3`, `grey16-tinys3`, or `spectra13-inkplate` for other variants. `esphome/dev.yaml` bakes the same override into a file if you prefer editing an include over typing the flag.
 
 Host unit tests for the panel-independent driver logic (JSON request bodies, byte counts, transfer state machine, pixel packing) — run from the repo root, needs only a C++ compiler:
 
@@ -72,7 +72,9 @@ Key files:
 **Factory / adoptable split**
 
 - `esphome/<variant>.yaml` — the *adoptable* config: board-specific hardware + `common.yaml` as a package. Pulls the display drivers from the published repo (`external_components: - source: ${components_source}`, default `github://GoogleBot42/picture-frame@main`; ESPHome auto-detects the `esphome/components` folder) so an adopted dashboard can build it anywhere.
-- `esphome/factory/<variant>.yaml` — the *factory* build CI compiles and publishes. Includes the adoptable yaml as a package and adds only what a pre-built binary needs: `esphome.project` (name `googlebot42.picture-frame`, version `${firmware_version}`, defaulting to `dev` and overridden by CI with the release tag), `name_add_mac_suffix`, `dashboard_import` (`github://GoogleBot42/picture-frame/esphome/<variant>.yaml@main`, `import_full_config: false`), `ota: platform: http_request`, and `update: platform: http_request` pointing at `https://googlebot42.github.io/picture-frame/firmware/<variant>/manifest.json` (combined esp-web-tools + OTA manifest). The update entity is only polled/refreshed while the device is deliberately staying awake, since a sleeping frame cannot install anything.
+- `esphome/factory/<variant>.yaml` — the *factory* build CI compiles and publishes. Includes the adoptable yaml as a package and adds only what a pre-built binary needs: `esphome.project` (name `googlebot42.picture-frame`, version `${firmware_version}`, defaulting to `dev` and overridden by CI with the release tag), `name_add_mac_suffix`, `dashboard_import` (`github://GoogleBot42/picture-frame/esphome/<variant>.yaml@main`, `import_full_config: false`), `ota: platform: http_request`, and `update: platform: http_request` pointing at `https://googlebot42.github.io/picture-frame/firmware/<variant>/manifest.json` (combined esp-web-tools + OTA manifest). CI also overrides `components_source=../components` so a release compiles the drivers from the tagged checkout, not from `@main`.
+
+  The update entity sets `update_interval: never`, because `HttpRequestUpdate::setup()` schedules an initial check ~10 s after boot whenever the interval is *not* `never` — which would mean hitting GitHub Pages on every single wake, for an update a frame that is about to sleep could never install. The only automatic check is the `component.update: firmware_update` in the factory `on_boot` (priority -200), gated behind an untimed `wait_until` on the "Prevent Deep Sleep" switch: it fires when the frame is deliberately held awake (including when the switch is flipped on from HA after boot) and otherwise never completes, dying with the chip at deep sleep. Home Assistant's own "check for update" command still works — it calls the entity directly, not the poller.
 - `esphome/dev.yaml` — local-dev override that swaps `components_source` to the local `components/` directory. The source is a substitution, not an extra `external_components` entry, because ESPHome clones *every* entry in that list.
 
 **Releases (`.github/workflows/firmware.yml`, `site/README.md`)**
@@ -97,10 +99,24 @@ That interface is implemented once, in `components/eink_frame/` — the shared b
 
 **Deep sleep**
 
-Wake sources: timer (`sleep_duration`) + button on `${wake_pin}` (a per-device substitution: GPIO25 on TinyPico, GPIO0/boot on TinyS3, GPIO18/WAKE on Inkplate; must be RTC-capable). Sleep is only ever entered through the `maybe_sleep` script, which keeps the device awake when: "Prevent Deep Sleep" is on, the wake button is held, there are no WiFi credentials in NVS (`wifi::global_wifi_component->has_sta()`), or Home Assistant has never connected (the `has_been_adopted` global is set from `api.on_client_connected` and persists across sleep cycles). That guarantees a fresh device stays reachable for provisioning and adoption; once adopted it resumes wake → fetch → sleep even if HA is unreachable. HA entities: "Prevent Deep Sleep" switch, "Fetch Image Now" button, "Server URL"/"Server Auth Header" text, and (factory builds) the "Firmware" update entity.
+Wake sources: timer + button on `${wake_pin}` (a per-device substitution: GPIO25 on TinyPico, GPIO0/boot on TinyS3, GPIO18/WAKE on Inkplate; must be RTC-capable). The wake period is **runtime**-configurable through the "Sleep Duration" number entity (minutes, `restore_value`, initial value `${default_sleep_minutes}`) — factory binaries are compiled once for everyone, so it must not be baked in; `maybe_sleep` passes it to `deep_sleep.enter` as a templated `sleep_duration` lambda.
+
+There is no `run_duration`: sleep is only ever entered through the explicit `deep_sleep.enter` in the `maybe_sleep` script, so anything that stops `maybe_sleep` from reaching it keeps the frame awake indefinitely. It stays awake when: "Prevent Deep Sleep" is on (checked here because `deep_sleep.enter` bypasses `deep_sleep.prevent`), there are no WiFi credentials in NVS (`wifi::global_wifi_component->has_sta()`), or Home Assistant has never connected (the `has_been_adopted` global is set from `api.on_client_connected` and persists across sleep cycles). That guarantees a fresh device stays reachable for provisioning and adoption; once adopted it resumes wake → fetch → sleep even if HA is unreachable.
+
+`maybe_sleep` deliberately does **not** check the wake button: `wakeup_pin_mode: KEEP_AWAKE` already makes `deep_sleep.enter` defer while the pin is held and latch the sleep for when it is released. Holding the wake button through a reset instead turns the "Prevent Deep Sleep" switch **on** (`on_boot`, priority -100), so the OTA window is a single piece of state, visible and revocable from Home Assistant; the switch's `on_turn_off` re-runs `maybe_sleep` so turning it off actually puts the frame back to sleep. Every boot runs `fetch_and_display` regardless — "staying awake" never means "stop refreshing the picture".
+
+`api: reboot_timeout: 0s` (default is 15 min) — otherwise any frame not currently connected to HA would reboot every 15 minutes, costing a full panel refresh and capping every OTA window.
+
+HA entities: "Prevent Deep Sleep" switch, "Sleep Duration" number, "Fetch Image Now" button, "Server URL"/"Server Auth Header" text, and (factory builds) the "Firmware" update entity.
 
 ### Nix Integration
 
 - `flake.nix` — Defines packages (server, smartcrop), dev shell, NixOS module, and checks. Inputs track `nixos-unstable`; `nix develop` therefore ships a current Go, Python 3, and ESPHome
-- `overlay.nix` — Package overlay for use by other flakes
-- `server/default.nix` — Builds smartcrop Python package, Go server, and wraps the binary so smartcrop-cli is in PATH
+- `overlay.nix` — The package overlay, and the single source of truth for it: `flake.nix` sets `overlays.default = import ./overlay.nix`, so `nix flake check` exercises the same file downstream flakes import. It exports the same package set under two attributes, `pkgs.picture-frame` (used by this repo and `server/service.nix`) and `pkgs.dynamic-frame` (the older name, kept for downstream consumers)
+- `server/default.nix` — Builds smartcrop Python package, Go server, and wraps the binary so smartcrop-cli is in PATH. The wrapper must use `--prefix PATH :` — `--set PATH "...:$PATH"` expands `$PATH` at build time and drags the whole stdenv toolchain (~870 MiB) into the runtime closure of a network-facing daemon
+
+Checks (`nix flake check`, and `.github/workflows/checks.yml` on the GitHub mirror):
+
+- `checks.build` — builds the server; buildGoModule's checkPhase runs the Go tests
+- `checks.einkTests` — compiles and runs `esphome/tests/run.sh` (host unit tests for the panel-independent display logic) in the sandbox, with `CXX` and `EINK_TESTS_NIX_RETRY=1` set so its `nix shell` fallback never fires
+- `checks.service` — NixOS VM test: starts the systemd service, asserts `/calibrationImage` answers 200 with a non-empty body, and that a `/fetchImage` against an imgDir with no usable images cannot kill the daemon (the main PID must be unchanged)

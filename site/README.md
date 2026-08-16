@@ -24,7 +24,11 @@ git data flows one way, Gitea → GitHub.
    `esphome/factory/` with [`esphome/build-action`](https://github.com/esphome/build-action),
    using `complete-manifest: true`.
 4. Every build is stamped with the tag's version — tag `v1.3.0` stamps `1.3.0`
-   — passed in as the ESPHome substitution `firmware_version`.
+   — passed in as the ESPHome substitution `firmware_version`. The workflow
+   also overrides `components_source=../components`, so the custom display
+   drivers are compiled from the tagged checkout rather than from
+   `github://GoogleBot42/picture-frame@main` (the default that makes an adopted
+   config buildable anywhere).
 5. The `release` job attaches every `*.factory.bin`, `*.ota.bin` and
    `<variant>.manifest.json` to the GitHub Release for the tag
    (`softprops/action-gh-release`, with generated release notes).
@@ -33,10 +37,16 @@ git data flows one way, Gitea → GitHub.
    `actions/upload-pages-artifact` + `actions/deploy-pages`.
 
 Publishing a release **is** the OTA push: the Pages URLs below are stable and
-always serve the newest stable release, so the moment the deploy finishes every
-frame on an older version sees an update. That is why builds are gated on tags
-rather than on pushes to `main` — a commit should not ship firmware to every
-device in the house.
+always serve the newest stable release, so from the moment the deploy finishes
+that is what every frame installs. That is why builds are gated on tags rather
+than on pushes to `main` — a commit should not ship firmware to every device in
+the house.
+
+Frames do **not** poll on a schedule (`update_interval: never`): a frame is
+asleep almost all the time, and a check it cannot act on is just traffic. Each
+one checks this site when it is deliberately held awake — the "Prevent Deep
+Sleep" switch, which is also what holding the wake button through a reset turns
+on — and installing is then a click on the *Firmware* entity in Home Assistant.
 
 Steps 5 and 6 are independent on purpose. Pages is the channel devices actually
 poll, so a flaky release-asset upload must never block the OTA; the release
@@ -45,9 +55,12 @@ assets are a permanent per-version archive for humans.
 **Pre-releases.** Give the tag any semver prerelease suffix — `v1.3.0-rc.1`.
 That single fact drives the whole split: the GitHub Release is marked
 *prerelease* and the Pages deploy is **skipped**, so the URL devices poll keeps
-serving the last stable build. Install a pre-release by hand
-(`esphome run esphome/<variant>.yaml --device <IP>`, or flash the
-`*.factory.bin` from the release page).
+serving the last stable build. Install a pre-release by hand: download its
+`*.factory.bin` from the release page and flash it over USB (esp-web-tools at
+<https://web.esphome.io>, or `esptool`). Building from a working tree with
+`esphome run` is *not* the same firmware — that produces the adoptable config,
+without the `project:` version stamp, `dashboard_import`, or the `update:`
+component, so the device would not be on the release channel at all.
 
 A failed run is recovered by re-running it from the Actions tab — the release
 step upserts, so it is idempotent. Never fix a release by pushing to GitHub.
@@ -57,8 +70,9 @@ The single `manifest.json` per variant serves two consumers:
 - **esp-web-tools** in the browser reads `builds[].parts[]` and flashes
   `*.factory.bin` over USB.
 - **the device itself** — the ESPHome `update:` component with
-  `platform: http_request` — polls the same file and reads `version` plus
-  `builds[].ota.path` / `.md5` to install `*.ota.bin` over Wi-Fi.
+  `platform: http_request` — reads the same file for `version` plus
+  `builds[].ota.path` / `.md5` to install `*.ota.bin` over Wi-Fi (on demand,
+  not on a poll interval; see above).
 
 ### The version contract
 
@@ -87,10 +101,17 @@ doesn't match — otherwise devices would silently keep a hard-coded version and
 never update.
 
 There is no `VERSION` file: nothing in the tree carries a version, so the tag is
-the single source of truth and a version can never drift from what was tagged.
-It also cannot be published twice by accident, because a tag is cut once.
-(`dev` stays the default so local `esphome compile` of a factory config still
-works.)
+the single source of truth for the version and it can never drift from what was
+tagged. It also cannot be published twice by accident, because a tag is cut
+once. (`dev` stays the default so local `esphome compile` of a factory config
+still works.)
+
+The tag is the single source of truth for the *code*, too, but only because of
+the `components_source=../components` override in step 4. `esphome/common.yaml`
+defaults `components_source` to `github://GoogleBot42/picture-frame@main`, and
+ESPHome clones that at build time — so without the override a release built
+from tag `v1.3.0` would compile the drivers from whatever was on `main` at that
+moment. Do not drop it.
 
 ## Published URLs
 
@@ -135,7 +156,8 @@ From there:
 2. `.github/workflows/firmware.yml` fires on the mirrored tag, resolves the
    version from it, builds all five variants, publishes the GitHub Release with
    the binaries and manifests attached, and deploys Pages;
-3. every frame on an older version picks the update up on its next wake.
+3. every frame on an older version offers the update the next time it is held
+   awake (see "Frames do not poll on a schedule" above).
 
 Watch it at <https://github.com/GoogleBot42/picture-frame/actions>. A tag that
 lands on GitHub with no run means the mirror pushed with an identity Actions

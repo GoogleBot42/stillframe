@@ -112,12 +112,10 @@ func TestProcessFindingCropPropagatesProcessError(t *testing.T) {
 	}
 }
 
-func TestProcessFindingCropLeaksTempFilesOnError_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: bestcrop.go:43 returns early when processFunc fails, skipping the " +
-		"os.Remove calls at lines 47-52. Every failed crop (which is every request when " +
-		"smartcrop-cli is missing or errors) leaves an orphaned temp directory containing " +
-		"a full-size PNG in TMPDIR. The cleanup should be deferred.")
-
+// Cleanup is deferred, so a failed crop - which is every request when
+// smartcrop-cli is missing or errors - must not leave a full-size PNG behind in
+// TMPDIR.
+func TestProcessFindingCropCleansUpOnError(t *testing.T) {
 	var tmpDir string
 	_, _ = ProcessFindingCrop(gradientRGBA(4, 4), 10, 10, func(path string, w, h int) (image.Rectangle, error) {
 		tmpDir = filepath.Dir(path)
@@ -240,11 +238,12 @@ func TestGetBestPieceOfImageHonoursTheCropRect(t *testing.T) {
 	}
 }
 
-// Without smartcrop-cli, ProcessFindingCrop fails, GetBestPieceOfImage discards
-// the error (bestcrop.go:90), and SubImage(image.Rectangle{}) yields an empty
-// image. resize.Resize of an empty image returns a 0x0 image, so the whole
-// pipeline silently produces nothing. This pins that (bad) behaviour.
-func TestGetBestPieceOfImageWithoutSmartcropReturnsEmptyImage(t *testing.T) {
+// When smartcrop-cli is missing or fails, GetBestPieceOfImage falls back to a
+// centered crop of the requested aspect ratio rather than propagating the zero
+// rectangle (which resized to a 0x0 image and made /fetchImage answer 200 with
+// an empty body; the firmware detects the short transfer and keeps the old
+// image, so the failure was invisible on the frame and in the response).
+func TestGetBestPieceOfImageWithoutSmartcropFallsBackToCenterCrop(t *testing.T) {
 	silenceStdout(t)
 	t.Setenv("PATH", t.TempDir())
 	if _, err := exec.LookPath("smartcrop-cli"); err == nil {
@@ -252,24 +251,58 @@ func TestGetBestPieceOfImageWithoutSmartcropReturnsEmptyImage(t *testing.T) {
 	}
 
 	got := GetBestPieceOfImage(32, 24, gradientRGBA(64, 48))
-	if got.Bounds().Dx() != 0 || got.Bounds().Dy() != 0 {
-		t.Fatalf("expected a 0x0 image when the cropper is unavailable, got %v", got.Bounds())
+	if got.Bounds() != image.Rect(0, 0, 32, 24) {
+		t.Errorf("a failed crop should still yield a full-size image, got %v", got.Bounds())
 	}
 }
 
-func TestGetBestPieceOfImageWithoutSmartcrop_KnownBug(t *testing.T) {
-	t.Skip("KNOWN BUG: bestcrop.go:90 discards the error from ProcessFindingCrop " +
-		"(`bestCrop, _ := ...`). When smartcrop-cli is missing or fails, bestCrop is the " +
-		"zero rectangle, SubImage returns an empty image, resize.Resize returns a 0x0 " +
-		"image and /fetchImage answers 200 with a zero-length body - the frame just goes " +
-		"blank with no diagnostic. It should either surface the error or fall back to a " +
-		"centre crop.")
+func TestCenterCrop(t *testing.T) {
+	cases := []struct {
+		name          string
+		bounds        image.Rectangle
+		width, height int
+		want          image.Rectangle
+	}{
+		{"same aspect ratio uses the whole image", image.Rect(0, 0, 64, 48), 32, 24, image.Rect(0, 0, 64, 48)},
+		{"source wider than target crops the sides", image.Rect(0, 0, 100, 50), 1, 1, image.Rect(25, 0, 75, 50)},
+		{"source taller than target crops top and bottom", image.Rect(0, 0, 50, 100), 1, 1, image.Rect(0, 25, 50, 75)},
+		{"honours a non-zero origin", image.Rect(10, 20, 110, 70), 1, 1, image.Rect(35, 20, 85, 70)},
+		{"degenerate source is returned unchanged", image.Rect(0, 0, 0, 0), 8, 8, image.Rect(0, 0, 0, 0)},
+		{"degenerate target is returned unchanged", image.Rect(0, 0, 8, 8), 0, 0, image.Rect(0, 0, 8, 8)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := centerCrop(tc.bounds, tc.width, tc.height); got != tc.want {
+				t.Errorf("centerCrop(%v, %d, %d) = %v, want %v", tc.bounds, tc.width, tc.height, got, tc.want)
+			}
+		})
+	}
+}
 
+// The fallback must keep the middle of the picture, not a corner.
+func TestGetBestPieceOfImageFallbackKeepsTheCenter(t *testing.T) {
 	silenceStdout(t)
 	t.Setenv("PATH", t.TempDir())
-	got := GetBestPieceOfImage(32, 24, gradientRGBA(64, 48))
-	if got.Bounds() != image.Rect(0, 0, 32, 24) {
-		t.Errorf("a failed crop should still yield a full-size image, got %v", got.Bounds())
+	if _, err := exec.LookPath("smartcrop-cli"); err == nil {
+		t.Skip("smartcrop-cli is still resolvable")
+	}
+
+	// A wide image: red edges, blue middle third. A square crop keeps the blue.
+	src := image.NewRGBA(image.Rect(0, 0, 90, 30))
+	for y := 0; y < 30; y++ {
+		for x := 0; x < 90; x++ {
+			if x >= 30 && x < 60 {
+				src.SetRGBA(x, y, color.RGBA{0, 0, 255, 255})
+			} else {
+				src.SetRGBA(x, y, color.RGBA{255, 0, 0, 255})
+			}
+		}
+	}
+
+	got := GetBestPieceOfImage(8, 8, src)
+	r, _, b, _ := got.At(4, 4).RGBA()
+	if b <= r {
+		t.Errorf("the centered fallback crop should keep the blue middle, got r=%d b=%d", r, b)
 	}
 }
 

@@ -62,11 +62,14 @@ std::string build_image_request_body(int width, int height, bool flip_vertical, 
 void EinkFrameDisplay::begin_image() {
   this->bytes_written_ = 0;
   this->transfer_failed_ = false;
+  this->session_active_ = true;
   this->on_begin_image_();
 }
 
 void EinkFrameDisplay::write_image_data(const uint8_t *data, size_t len) {
-  if (this->transfer_failed_)
+  // No transfer open: the driver's frame buffer may not exist (finish_image()
+  // frees it), so nothing may reach the panel hooks.
+  if (!this->session_active_ || this->transfer_failed_)
     return;
 
   // Drop anything past the image the panel asked for: a server that sends more
@@ -79,11 +82,14 @@ void EinkFrameDisplay::write_image_data(const uint8_t *data, size_t len) {
   if (len == 0)
     return;
 
-  this->on_image_data_(data, len);
+  // The hook is handed the offset explicitly, so it does not depend on whether
+  // bytes_written_ has been updated yet.
+  this->on_image_data_(this->bytes_written_, data, len);
   this->bytes_written_ += len;
 }
 
 void EinkFrameDisplay::finish_image(bool ok) {
+  this->session_active_ = false;
   this->on_image_end_();
 
   size_t expected = this->get_image_byte_count();

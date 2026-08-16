@@ -1,13 +1,13 @@
 # Local development build: same as the adoptable configs, but the custom
 # display components are taken from ./components instead of the published repo.
 #
-#   nix shell nixpkgs#esphome --command esphome run dev.yaml
+#   nix develop --command esphome run dev.yaml
 #
 # Change the include below to the variant you are working on. The same override
 # works without editing this file by passing the substitution on the command
 # line, which is usually more convenient:
 #
-#   nix shell nixpkgs#esphome --command esphome -s components_source components \
+#   nix develop --command esphome -s components_source components \
 #       run color7-tinys3.yaml
 #
 # `components_source` must be *replaced*, not appended to: ESPHome clones every

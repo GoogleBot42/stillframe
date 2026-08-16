@@ -80,8 +80,12 @@ let
       mkdir -p $out/bin
       cp ${server}/bin/* $out/bin/
 
+      # --prefix (not --set "...:$PATH"): $PATH would be expanded at BUILD time,
+      # baking the sandbox's stdenv (gcc, binutils, patchelf, make, ...) into the
+      # wrapper and therefore into the runtime closure of a network-facing
+      # daemon. smartcrop-cli is the only thing the server needs to find.
       wrapProgram $out/bin/server \
-        --set PATH "${smartcrop-cli}/bin:$PATH"
+        --prefix PATH : "${smartcrop-cli}/bin"
     '';
 
     meta.mainProgram = "server";
