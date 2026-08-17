@@ -371,6 +371,27 @@
     font-variant-numeric: tabular-nums;
   }
 
+  .device-warning {
+    margin: 0.5rem 0 0;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    font-size: 0.88rem;
+    background: var(--surface);
+  }
+
+  pre.cli {
+    margin: 0.5rem 0 0.3rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    overflow-x: auto;
+    font-size: 0.78rem;
+    line-height: 1.45;
+  }
+
   button.install {
     appearance: none;
     border: 0;
@@ -562,6 +583,17 @@
           Spectra (ESP32-S3). Slide its power switch to ON — the blue LED must
           be lit, or the board never appears as a serial port.
         </p>
+        <p class="device-warning">
+          <strong>Known issue — the very first install from the browser does
+          not work on this board.</strong> Its CH340K USB bridge plus browser
+          serial timing cannot get a factory-fresh board into download mode,
+          and it has no BOOT button to force it. Do the first flash from a
+          terminal instead (<a href="#cli-flash">one esptool command</a>).
+          After that, browser installs work every time: hold the
+          <strong>WAKE</strong> button ~8&nbsp;seconds (or use the "Enter
+          Flashing Mode" button in Home Assistant) and the board reboots
+          itself into download mode, ready for the Install button here.
+        </p>
         <span class="device-meta" data-version></span>
       </div>
       <esp-web-install-button
@@ -638,14 +670,22 @@
         later split the reset pulse into two USB transfers, which makes the race
         harder to win.
       </li>
-      <li>
-        <strong>Last resort:</strong> flash from a terminal with
+      <li id="cli-flash">
+        <strong>The reliable fallback:</strong> flash from a terminal with
         <code>esptool</code> — it drives the reset lines in one atomic system
-        call and effectively always works. The recipe is in the
+        call and effectively always works. For the Inkplate 13 Spectra (adjust
+        the manifest URL and port for other boards):
+        <pre class="cli"><code>curl -LO https://googlebot42.github.io/stillframe/firmware/spectra13-inkplate/stillframe-spectra13-esp32s3.factory.bin
+esptool --chip esp32s3 --port /dev/ttyUSB0 --baud 921600 \
+  --before default-reset --after hard-reset \
+  write-flash -z --flash-mode keep --flash-freq keep --flash-size keep \
+  0x0 stillframe-spectra13-esp32s3.factory.bin</code></pre>
+        More detail in the
         <a
           href="https://github.com/GoogleBot42/stillframe/blob/main/site/README.md#flashing-from-the-command-line"
           >project README</a
-        >.
+        >. After this one flash, browser installs work reliably via the
+        firmware's flashing-mode button (hold WAKE ~8s).
       </li>
     </ul>
   </details>
