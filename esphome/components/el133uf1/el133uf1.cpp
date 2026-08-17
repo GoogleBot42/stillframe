@@ -4,6 +4,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <cinttypes>
 #include <cstring>
 
 namespace esphome {
@@ -11,9 +12,42 @@ namespace el133uf1 {
 
 static const char *const TAG = "el133uf1";
 
-static const uint32_t BUSY_TIMEOUT_INIT_MS = 10000;
-// A full Spectra 6 refresh takes ~19-25 seconds.
-static const uint32_t BUSY_TIMEOUT_REFRESH_MS = 60000;
+// Busy-wait budgets, per phase. Both of Soldered's own drivers wait for BUSY
+// *forever* (Inkplate-Arduino-library src/boards/Inkplate13SPECTRA/
+// Inkplate13SPECTRADriver.cpp waitForBusy(); Soldered-Inkplate-ESPHome
+// components/inkplate_spi/inkplate13.cpp is_busy_() polled from a state
+// machine that simply never advances), so any bound here is stricter than the
+// reference. These are set generously enough that they only ever trip on a
+// genuine fault — a panel that is not powered, not out of reset, or not
+// connected — rather than on a slow-but-working panel.
+static const uint32_t BUSY_TIMEOUT_PON_MS = 30000;      // power-up: DC-DC + VCOM ramp
+static const uint32_t BUSY_TIMEOUT_DATA_MS = 15000;     // one controller latching its half
+static const uint32_t BUSY_TIMEOUT_REFRESH_MS = 60000;  // full Spectra 6 refresh is ~19-25 s
+static const uint32_t BUSY_TIMEOUT_POF_MS = 15000;      // power-down
+
+// Not a wait we depend on: Soldered go straight from the reset delay to the
+// init registers. Waveshare's reference driver for the same panel (e-Paper
+// E-paper_Separate_Program/13.3inch_e-Paper_E/.../EPD_13in3e.c, EPD_13IN3E_Init)
+// does wait for BUSY here, so sampling it is free information about whether the
+// controller ever came out of reset at all. Never fatal.
+static const uint32_t BUSY_PROBE_AFTER_RESET_MS = 2000;
+
+// Power-on timing, from Soldered's setPanelState(true)/resetPanel():
+// pins low, 50 ms; PWR_EN high, 100 ms; RST low, 100 ms; RST high, 100 ms
+// (+ a further 100 ms in the Arduino driver, which is the longer of the two).
+static const uint32_t DISCHARGE_MS = 50;
+static const uint32_t PWR_EN_SETTLE_MS = 100;
+static const uint32_t RESET_LOW_MS = 100;
+static const uint32_t RESET_SETTLE_MS = 200;
+
+// Waveshare's TurnOnDisplay() pauses between the data phase and DRF; harmless
+// and cheap insurance against issuing the refresh into a still-settling panel.
+static const uint32_t PRE_REFRESH_MS = 50;
+
+static const char *const HINT_POWER =
+    "check panel power (PWR_EN), the FFC cable seating and the BS0/BS1 strapping — BUSY is pulled up on the ESP "
+    "side, so a LOW reading means a powered controller is holding it, not a dead one";
+static const char *const HINT_DATA = "the controller accepted the DTM command but never released BUSY";
 
 // Register/command bytes (Soldered Inkplate13SPECTRA driver / Waveshare EPD_13in3e)
 static const uint8_t REG_PSR = 0x00;
@@ -73,16 +107,14 @@ void EL133UF1::setup() {
   if (bs1_pin_ != nullptr)
     bs1_pin_->setup();
 
-  // Panel stays unpowered until an image transfer starts.
-  cs_m_pin_->digital_write(true);
-  cs_s_pin_->digital_write(true);
-  dc_pin_->digital_write(true);
-  reset_pin_->digital_write(false);
-  pwr_en_pin_->digital_write(false);
-  if (bs0_pin_ != nullptr)
-    bs0_pin_->digital_write(false);
-  if (bs1_pin_ != nullptr)
-    bs1_pin_->digital_write(true);
+  // The panel stays unpowered until an image transfer starts, so park every
+  // panel-facing pin LOW rather than at its idle-active level: with the rail
+  // off, a pin driven high back-feeds the panel through the controller's ESD
+  // diodes and can leave it partially powered and never properly reset. This
+  // is the state Soldered's setPanelPinsToLow()/set_all_pins_low_() establishes
+  // ("Function helps empty capacitors, without this sometimes the panel refuses
+  // to refresh"), and the state power_on_and_init_() starts every cycle from.
+  discharge_pins_();
 
   this->spi_setup();
 }
@@ -114,15 +146,25 @@ void EL133UF1::on_image_data_(size_t offset, const uint8_t *data, size_t len) {
 }
 
 void EL133UF1::on_finish_image_(bool complete) {
-  if (complete) {
-    // Left half to the master controller, right half to the slave.
+  // `powered_` is false if power_on_and_init_() gave up: there is nothing on
+  // the other end of the bus worth talking to, so go straight to the power-off
+  // path (which also puts the pins back in the discharge state).
+  if (complete && powered_) {
+    // Left half to the master controller, right half to the slave. Each
+    // controller has to finish latching its half before the other is addressed
+    // — Soldered wait for BUSY between the two DTM frames, and again before
+    // DRF (Inkplate13SPECTRADriver.cpp display(); inkplate13.cpp TRF_WAIT_MASTER
+    // / TRF_WAIT_SLAVE).
     send_image_half_(CHIP_MASTER, 0);
-    send_image_half_(CHIP_SLAVE, NATIVE_WIDTH / 2);
-    wait_busy_(BUSY_TIMEOUT_INIT_MS);
-
-    delay(50);
-    send_command_(REG_DRF, DRF_V, sizeof(DRF_V), CHIP_BOTH);
-    wait_busy_(BUSY_TIMEOUT_REFRESH_MS);
+    if (wait_busy_(BUSY_TIMEOUT_DATA_MS, "master controller latching left half (DTM)", HINT_DATA)) {
+      send_image_half_(CHIP_SLAVE, NATIVE_WIDTH / 2);
+      if (wait_busy_(BUSY_TIMEOUT_DATA_MS, "slave controller latching right half (DTM)", HINT_DATA)) {
+        delay(PRE_REFRESH_MS);
+        send_command_(REG_DRF, DRF_V, sizeof(DRF_V), CHIP_BOTH);
+        wait_busy_(BUSY_TIMEOUT_REFRESH_MS, "display refresh (DRF)",
+                   "a full Spectra 6 refresh normally takes 19-25 s");
+      }
+    }
   }
 
   power_off_();
@@ -135,23 +177,32 @@ void EL133UF1::power_on_and_init_() {
   if (powered_)
     return;
 
-  // Discharge, then power the panel rail and release reset.
-  cs_m_pin_->digital_write(false);
-  cs_s_pin_->digital_write(false);
-  dc_pin_->digital_write(false);
-  reset_pin_->digital_write(false);
-  pwr_en_pin_->digital_write(false);
-  delay(50);
+  // Discharge every panel pin (including BUSY and the BS strapping pins, which
+  // are otherwise held at their idle level and keep back-feeding the unpowered
+  // controller), then bring the rail up and release reset.
+  discharge_pins_();
+  delay(DISCHARGE_MS);
 
-  cs_m_pin_->digital_write(true);
-  cs_s_pin_->digital_write(true);
-  dc_pin_->digital_write(true);
+  restore_pins_();
   pwr_en_pin_->digital_write(true);
-  delay(100);
+  delay(PWR_EN_SETTLE_MS);
   reset_pin_->digital_write(false);
-  delay(100);
+  delay(RESET_LOW_MS);
   reset_pin_->digital_write(true);
-  delay(100);
+  delay(RESET_SETTLE_MS);
+
+  // Diagnostic only — never fatal, see BUSY_PROBE_AFTER_RESET_MS.
+  uint32_t probe_start = millis();
+  while (!busy_pin_->digital_read() && millis() - probe_start < BUSY_PROBE_AFTER_RESET_MS) {
+    eink_frame::feed_watchdog();
+    delay(1);
+  }
+  if (busy_pin_->digital_read()) {
+    ESP_LOGD(TAG, "BUSY high %" PRIu32 " ms after reset release", millis() - probe_start);
+  } else {
+    ESP_LOGW(TAG, "BUSY still LOW %" PRIu32 " ms after reset release — controller may not have started",
+             BUSY_PROBE_AFTER_RESET_MS);
+  }
 
   send_command_(REG_AN_TM, AN_TM_V, sizeof(AN_TM_V), CHIP_MASTER);
   send_command_(REG_CMD66, CMD66_V, sizeof(CMD66_V), CHIP_BOTH);
@@ -172,7 +223,10 @@ void EL133UF1::power_on_and_init_() {
   send_command_(REG_TFT_VCOM_POWER, TFT_VCOM_POWER_V, sizeof(TFT_VCOM_POWER_V), CHIP_MASTER);
 
   send_command_(REG_PON, nullptr, 0, CHIP_BOTH);
-  if (!wait_busy_(BUSY_TIMEOUT_INIT_MS)) {
+  if (!wait_busy_(BUSY_TIMEOUT_PON_MS, "panel power-up (PON) during init", HINT_POWER)) {
+    // Do not leave the rail energized behind a failed init: cut it back to the
+    // discharge state so the next attempt starts from a real power-on reset.
+    power_off_();
     this->mark_transfer_failed_();
     return;
   }
@@ -182,19 +236,65 @@ void EL133UF1::power_on_and_init_() {
 }
 
 void EL133UF1::power_off_() {
-  if (!powered_)
-    return;
-  send_command_(REG_POF, POF_V, sizeof(POF_V), CHIP_BOTH);
-  wait_busy_(BUSY_TIMEOUT_INIT_MS);
+  if (powered_) {
+    send_command_(REG_POF, POF_V, sizeof(POF_V), CHIP_BOTH);
+    wait_busy_(BUSY_TIMEOUT_POF_MS, "panel power-down (POF)");
+    powered_ = false;
+    ESP_LOGI(TAG, "Panel powered off");
+  }
+  // Also reached with powered_ == false (failed init, sleep() before the first
+  // update): the point is to end with the rail off and nothing driving the
+  // panel's inputs high.
+  discharge_pins_();
+}
+
+// Every panel-facing pin driven LOW with the rail off, so nothing back-feeds
+// the controller. Mirrors Soldered's setPanelPinsToLow()/set_all_pins_low_(),
+// BUSY included — it is briefly an output here.
+void EL133UF1::discharge_pins_() {
+  GPIOPin *const pins[] = {cs_m_pin_, cs_s_pin_, dc_pin_, reset_pin_, busy_pin_, pwr_en_pin_, bs0_pin_, bs1_pin_};
+  for (GPIOPin *pin : pins) {
+    if (pin == nullptr)
+      continue;
+    pin->pin_mode(gpio::FLAG_OUTPUT);
+    pin->digital_write(false);
+  }
+}
+
+// Undo discharge_pins_(): the idle levels the panel expects while powered.
+// Mirrors Soldered's setIO()/set_io_pins_(). BUSY goes back to whatever input
+// mode the YAML configured (INPUT_PULLUP on the Inkplate 13 Spectra) via its
+// own setup(), rather than a hardcoded mode.
+void EL133UF1::restore_pins_() {
+  GPIOPin *const outputs[] = {cs_m_pin_, cs_s_pin_, dc_pin_, reset_pin_, pwr_en_pin_, bs0_pin_, bs1_pin_};
+  for (GPIOPin *pin : outputs) {
+    if (pin != nullptr)
+      pin->pin_mode(gpio::FLAG_OUTPUT);
+  }
+  busy_pin_->setup();
+
+  cs_m_pin_->digital_write(true);
+  cs_s_pin_->digital_write(true);
+  dc_pin_->digital_write(true);
   reset_pin_->digital_write(false);
   pwr_en_pin_->digital_write(false);
-  powered_ = false;
-  ESP_LOGI(TAG, "Panel powered off");
+  if (bs0_pin_ != nullptr)
+    bs0_pin_->digital_write(false);
+  if (bs1_pin_ != nullptr)
+    bs1_pin_->digital_write(true);
 }
 
 // BUSYN is LOW while busy. Returns false on timeout.
-bool EL133UF1::wait_busy_(uint32_t timeout_ms) {
-  return eink_frame::wait_for_pin(busy_pin_, true, timeout_ms, TAG, "busy pin");
+//
+// There are only a handful of these per refresh cycle, so the successful ones
+// are logged at INFO too: a hardware log that says which phase took how long is
+// what turns "it hung" into "it hung *here*" next time.
+bool EL133UF1::wait_busy_(uint32_t timeout_ms, const char *phase, const char *hint) {
+  uint32_t start = millis();
+  if (!eink_frame::wait_for_pin(busy_pin_, true, timeout_ms, TAG, phase, hint))
+    return false;
+  ESP_LOGI(TAG, "BUSY released after %" PRIu32 " ms — %s", millis() - start, phase);
+  return true;
 }
 
 // Chip select is active LOW and driven by hand: one SPI bus, two controllers,

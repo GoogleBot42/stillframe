@@ -68,7 +68,9 @@ class EL133UF1 : public Component,
 
   void power_on_and_init_();
   void power_off_();
-  bool wait_busy_(uint32_t timeout_ms);
+  void discharge_pins_();
+  void restore_pins_();
+  bool wait_busy_(uint32_t timeout_ms, const char *phase, const char *hint = nullptr);
   void send_command_(uint8_t cmd, const uint8_t *data, size_t len, uint8_t chips);
   void select_chips_(uint8_t chips, bool selected);
   void send_image_half_(uint8_t chips, int px_start);

@@ -23,16 +23,24 @@ void feed_watchdog() {
   App.feed_wdt();
 }
 
-bool wait_for_pin(GPIOPin *pin, bool ready_level, uint32_t timeout_ms, const char *tag, const char *what) {
+bool wait_for_pin(GPIOPin *pin, bool ready_level, uint32_t timeout_ms, const char *tag, const char *phase,
+                  const char *hint) {
   uint32_t start = millis();
   while (pin->digital_read() != ready_level) {
     if (millis() - start > timeout_ms) {
-      ESP_LOGE(tag, "Timeout (%" PRIu32 " ms) waiting for %s", timeout_ms, what);
+      // Report the level actually read rather than just "timed out": a pin
+      // stuck at the *wrong* level for the whole budget and a pin that is
+      // floating/undriven look identical in a bare timeout message.
+      ESP_LOGE(tag, "%s: timed out after %" PRIu32 " ms — pin still reads %s, expected %s", phase,
+               millis() - start, pin->digital_read() ? "HIGH" : "LOW", ready_level ? "HIGH" : "LOW");
+      if (hint != nullptr)
+        ESP_LOGE(tag, "  %s", hint);
       return false;
     }
     feed_watchdog();
     delay(1);
   }
+  ESP_LOGV(tag, "%s: ready after %" PRIu32 " ms", phase, millis() - start);
   return true;
 }
 
