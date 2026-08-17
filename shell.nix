@@ -7,6 +7,7 @@ mkShell {
     go
     python3
     esphome
+    esptool
   ];
 
   # Disabling hardening is required for go debugger to work. Not needed for packaging.
