@@ -109,15 +109,33 @@
      * and `connect()` cycles through them over 7 attempts. There is no way to
      * add entries to that array from outside, but each attempt calls
      * `strategy.reset()` afresh, so a counter shared by both objects lets us
-     * vary the strategy per attempt: two combined-signal tries, then one stock
-     * split-signal try, repeating. Over the 7 attempts that is 5 combined and 2
-     * stock — the fix gets most of the tries, while a board that somehow only
-     * likes the stock timing still gets its chance.
+     * vary the strategy per attempt. Attempt 1 skips the reset entirely, to
+     * support a chip pre-armed into download mode by the firmware's flashing
+     * mode (resetting it then would kick it back OUT of download mode).
+     * The remaining 6 attempts alternate: combined-signal tries with one stock
+     * split-signal try in three — 4 combined, 2 stock — so the fix gets most
+     * of the tries while a board that somehow only likes the stock timing
+     * still gets its chance.
      */
     function makeStrategy(transport, resetDelay, stock) {
       return {
         reset: async function () {
           var n = attemptCounter++;
+          if (n === 0) {
+            // First attempt: NO reset at all — just let sync() probe the port.
+            // If the user pre-armed download mode from the firmware ("Enter
+            // Flashing Mode" in HA, or holding WAKE ~8 s), the ROM downloader
+            // is already sitting there waiting, and any reset here would boot
+            // it straight back OUT of download mode: the RTS->EN reset path
+            // works fine on these boards — it is only the IO0 strap that is
+            // unreliable. This is the browser equivalent of esptool's
+            // `--before no-reset`. Cost when the chip is NOT pre-armed: one
+            // failed sync probe (~½ s) before the reset ladder below begins.
+            console.info(
+              TAG + " attempt 1: probing without reset (pre-armed flashing mode)"
+            );
+            return;
+          }
           if (n % 3 !== 2) {
             try {
               await combinedReset(transport, resetDelay);
