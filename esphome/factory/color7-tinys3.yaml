@@ -43,6 +43,14 @@ esphome:
         - wait_until:
             condition: wifi.connected
             timeout: 60s
+        # Serialize behind the boot image fetch: the update check runs in its
+        # own task whose watchdog raise/restore is global — overlapping a
+        # blocking fetch clobbers the fetch raised window (field-observed
+        # boot loop). Wait for the fetch script to finish before checking.
+        - wait_until:
+            condition:
+              not:
+                script.is_running: fetch_and_display
         - if:
             condition: wifi.connected
             then:

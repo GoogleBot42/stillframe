@@ -113,12 +113,27 @@ ota:
 logger:
   level: INFO
 
+# Raise the global task watchdog from ESPHome's 5 s default. Two reasons:
+# 1. Field-observed clobber: http_request's WatchdogManager raise/restore is
+#    GLOBAL and not refcounted. The factory update check runs in its own
+#    FreeRTOS task; when it exits it restores the watchdog to this configured
+#    value — even if fetch_and_display's blocking post() is still standing on
+#    its raised 45 s window. With the 5 s default that restored value WAS the
+#    trap (boot loop whenever the update check overlapped a slow fetch). The
+#    factory yamls also serialize the check behind the fetch, but this is the
+#    defense in depth.
+# 2. A frame that genuinely wedges reboots after 60 s instead of 5 — an
+#    acceptable trade for a device whose panel refresh alone takes ~25 s.
+esp32:
+  watchdog_timeout: 60s
+
 http_request:
   id: http_client
-  # A frame server on the LAN that has not answered in 15 s is not answering.
-  # Waiting longer only delays the "go back to sleep" path (and, before the
-  # watchdog_timeout below existed, made a reboot loop more likely).
-  timeout: 15s
+  # The server smart-crops and dithers a full panel image *before* responding
+  # (CIEDE2000 over ~2M pixels on the 13.3" panel) — the first byte of the
+  # response can legitimately take 15-25 s. 30 s covers it; a LAN server that
+  # has not answered in 30 s is not answering.
+  timeout: 30s
   # LOAD-BEARING. esp_http_client is *synchronous*: the post() in
   # fetch_and_display below blocks ESPHome's main loop for the whole request —
   # DNS (which can stall for many seconds on an unresolvable name such as the
