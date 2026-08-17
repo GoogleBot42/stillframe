@@ -1,6 +1,5 @@
 #include "it8951_spi.h"
 #include "esphome/components/eink_frame/eink_wait.h"
-#include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
@@ -73,7 +72,7 @@ void IT8951SPI::on_image_data_(size_t /*offset*/, const uint8_t *data, size_t le
   uint8_t burst[BURST_SIZE];
   packer_.feed(data, len, burst, BURST_SIZE, [this](const uint8_t *out, size_t out_len) {
     this->write_burst_(out, out_len);
-    App.feed_wdt();
+    eink_frame::feed_watchdog();
   });
 }
 
@@ -220,7 +219,7 @@ bool IT8951SPI::wait_for_display_ready_(uint32_t timeout_ms) {
       ESP_LOGE(TAG, "Timeout (%" PRIu32 " ms) waiting for display refresh", timeout_ms);
       return false;
     }
-    App.feed_wdt();
+    eink_frame::feed_watchdog();
     delay(10);
   }
   return true;

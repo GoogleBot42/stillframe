@@ -1,6 +1,5 @@
 #include "el133uf1.h"
 #include "esphome/components/eink_frame/eink_wait.h"
-#include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
@@ -238,7 +237,7 @@ void EL133UF1::send_image_half_(uint8_t chips, int px_start) {
       this->write_array(row_buf, HALF_ROW_BYTES);
     }
     if ((py & 0x3F) == 0)
-      App.feed_wdt();
+      eink_frame::feed_watchdog();
   }
 
   this->disable();
