@@ -115,7 +115,29 @@ logger:
 
 http_request:
   id: http_client
-  timeout: 40s
+  # A frame server on the LAN that has not answered in 15 s is not answering.
+  # Waiting longer only delays the "go back to sleep" path (and, before the
+  # watchdog_timeout below existed, made a reboot loop more likely).
+  timeout: 15s
+  # LOAD-BEARING. esp_http_client is *synchronous*: the post() in
+  # fetch_and_display below blocks ESPHome's main loop for the whole request —
+  # DNS (which can stall for many seconds on an unresolvable name such as the
+  # default homeassistant.local), TCP connect, TLS, transfer — while the ESP32
+  # task watchdog is armed at 5 s with panic enabled (esp32/__init__.py sets
+  # CONFIG_ESP_TASK_WDT_TIMEOUT_S from `esp32: watchdog_timeout:`, default 5s,
+  # and CONFIG_ESP_TASK_WDT_PANIC=y). No amount of feeding helps: the loop task
+  # is *inside* the blocking call and never gets to feed.
+  #
+  # This option is the sanctioned fix: http_request wraps perform(), read() and
+  # end() in a watchdog::WatchdogManager, which raises the task watchdog to this
+  # value for the duration and restores it afterwards. Without it the manager is
+  # constructed with 0 and does nothing at all (watchdog.cpp: `if (timeout_ms ==
+  # 0) return;`), which is why an unreachable server used to reboot-loop the
+  # frame: fetch -> 5 s -> "Task watchdog got triggered ... loopTask" -> abort.
+  #
+  # Comfortably above `timeout:` on purpose: the transport timeout only bounds
+  # socket operations, not name resolution, so perform() can outlast it.
+  watchdog_timeout: 45s
 
 deep_sleep:
   id: deep_sleep_control
@@ -313,7 +335,12 @@ script:
                 bool complete = false;
                 while (true) {
                   int n = container->read(buf.data(), buf.size());
-                  App.feed_wdt();
+                  // Writing a chunk to the panel can block for a while (SPI
+                  // plus a controller busy-wait), so keep the watchdog fed.
+                  // eink_frame::feed_watchdog() rather than App.feed_wdt():
+                  // see eink_wait.h — a bare feed logs "task not found" from
+                  // any task ESPHome has not subscribed to the watchdog.
+                  eink_frame::feed_watchdog();
                   yield();
                   auto res = http_request::http_read_loop_result(
                       n, last_data, 30000, container->is_read_complete());

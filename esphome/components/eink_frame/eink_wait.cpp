@@ -6,8 +6,22 @@
 
 #include <cinttypes>
 
+#ifdef USE_ESP32
+#include <esp_task_wdt.h>
+#endif
+
 namespace esphome {
 namespace eink_frame {
+
+void feed_watchdog() {
+#ifdef USE_ESP32
+  // esp_task_wdt_status() reports an unsubscribed task quietly
+  // (ESP_ERR_NOT_FOUND); esp_task_wdt_reset() would log an error instead.
+  if (esp_task_wdt_status(nullptr) != ESP_OK)
+    return;
+#endif
+  App.feed_wdt();
+}
 
 bool wait_for_pin(GPIOPin *pin, bool ready_level, uint32_t timeout_ms, const char *tag, const char *what) {
   uint32_t start = millis();
@@ -16,7 +30,7 @@ bool wait_for_pin(GPIOPin *pin, bool ready_level, uint32_t timeout_ms, const cha
       ESP_LOGE(tag, "Timeout (%" PRIu32 " ms) waiting for %s", timeout_ms, what);
       return false;
     }
-    App.feed_wdt();
+    feed_watchdog();
     delay(1);
   }
   return true;
