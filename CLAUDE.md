@@ -89,8 +89,9 @@ Five device variants (`color7-tinypico`, `color7-tinys3`, `grey16-tinypico`, `gr
 **Provisioning and runtime config (`common.yaml`)**
 
 - `wifi:` has no credentials and deliberately no fallback AP / captive portal. Provisioning is `improv_serial:` over USB (ESP Web Tools / web.esphome.io); re-provisioning means plugging in again. `reboot_timeout: 0s` so an in-progress Improv session is never interrupted.
-- Serial port per board: TinyPico has a USB-UART bridge (UART0 default). TinyS3 is native USB and `improv_serial` rejects `USB_CDC` on the S3, so those configs set `logger: hardware_uart: USB_SERIAL_JTAG`. The Inkplate 13 Spectra has a CH340C bridge, so it overrides the S3 default back to `UART0`.
+- Serial port per board: TinyPico has a USB-UART bridge (UART0 default). TinyS3 is native USB and `improv_serial` rejects `USB_CDC` on the S3, so those configs set `logger: hardware_uart: USB_SERIAL_JTAG`. The Inkplate 13 Spectra has a CH340K bridge, so it overrides the S3 default back to `UART0`.
 - `api:` has `encryption:` with no key — both plaintext and noise transports are compiled and Home Assistant pushes a dynamic PSK on adoption, which is then stored in flash. `ota: platform: esphome` has no password so the dashboard can reflash over the factory firmware.
+- Reflashing escape hatch (`components/flashing_mode/`): the "Enter Flashing Mode" button, or an 8 s hold of the wake button (`flashing_mode_hold` script), sets `RTC_CNTL_FORCE_DOWNLOAD_BOOT` in `RTC_CNTL_OPTION1_REG` and reboots, so the chip comes up in the ROM serial downloader with no BOOT button, strapping pin or DTR/RTS timing involved — essential on the Inkplate 13 Spectra, which has neither a BOOT button nor a dependable auto-download circuit. The bit is sticky — a power cycle or the EN/RESET button clears it, a software reset or deep-sleep wake does **not** — so the component also zeroes it in `setup()`, which is what keeps a one-shot flash request from arming every future wake. The classic ESP32 (TinyPico) has no such bit (it arrived with the S2's on-chip USB), so there the action just logs "hold BOOT and tap RESET".
 - Server config is runtime, via `restore_value` template text entities: **Server URL** (default `http://homeassistant.local:8080`) and **Server Auth Header** (default empty; the `Authorization` header is omitted when empty). Endpoint paths are derived from the base URL (`<base>/fetchImage`).
 
 The `fetch_and_display` script streams the HTTP response to the display in 4KB chunks (no full-image buffering, except on the EL133UF1 whose dual-controller layout requires a PSRAM frame buffer). Display drivers in `components/epd7in3f/`, `components/it8951_spi/`, and `components/el133uf1/`; each driver implements the same interface consumed by the shared script: `get_image_request_body()` (JSON capability body, including the color space), `get_image_byte_count()`, `begin_image()`, `write_image_data()`, `finish_image(ok)`, `wake()`, `sleep()`. The CS pin is managed by ESPHome's SPI framework (`enable()`/`disable()`), not manually — except the EL133UF1's two CS pins (`cs_m_pin`/`cs_s_pin`).
@@ -107,7 +108,7 @@ There is no `run_duration`: sleep is only ever entered through the explicit `dee
 
 `api: reboot_timeout: 0s` (default is 15 min) — otherwise any frame not currently connected to HA would reboot every 15 minutes, costing a full panel refresh and capping every OTA window.
 
-HA entities: "Prevent Deep Sleep" switch, "Sleep Duration" number, "Fetch Image Now" button, "Server URL"/"Server Auth Header" text, and (factory builds) the "Firmware" update entity.
+HA entities: "Prevent Deep Sleep" switch, "Sleep Duration" number, "Fetch Image Now" and "Enter Flashing Mode" buttons, "Server URL"/"Server Auth Header" text, and (factory builds) the "Firmware" update entity.
 
 ### Nix Integration
 

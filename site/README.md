@@ -211,6 +211,125 @@ Gitea Actions is **not** used by this repo. The workflow carries a
 later cannot make the Gitea side start publishing — Gitea stays the source of
 truth, GitHub stays the only publisher.
 
+## Why the install page patches esp-web-tools
+
+Browser flashing of the Inkplate 13 Spectra fails intermittently, and the
+failure is not in our firmware — it is in how esptool-js drives the board's
+auto-reset circuit. `site/index.html` carries a small, self-disabling patch for
+it. Read this before touching that script.
+
+**The mechanism.** The CH340K bridge (VID `0x1a86`, PID `0x7522`) wires DTR and
+RTS through the usual transistor pair to IO0 and EN. esptool-js's `ClassicReset`
+toggles them one signal at a time — `setDTR(false)`, `setRTS(true)`, wait,
+`setDTR(true)`, `setRTS(false)`, wait, `setDTR(false)` — and
+`Transport.setRTS()` internally issues a *second* `setSignals()` re-asserting
+DTR (a Windows workaround), so one reset costs **seven** `setSignals()`
+round-trips. An ESP32-S3 latches its boot straps within about 3 ms of EN rising,
+and the split `setDTR(true)` / `setRTS(false)` pair passes through the
+intermediate state (DTR=1, RTS=1) — EN released while IO0 is still high — with a
+renderer↔browser IPC hop inside that window. The chip boots the application
+instead of the ROM downloader, and esp-web-tools reports "Failed to initialize".
+Python `esptool` never sees this because `UnixTightReset` sets both modem lines
+in a single `TIOCMSET` ioctl.
+
+Upstream: [esptool-js#222](https://github.com/espressif/esptool-js/issues/222)
+(open) and [PR #225](https://github.com/espressif/esptool-js/pull/225)
+(unmerged). Chromium's `SerialSplitDtrAndRts` feature, on by default from 141 on
+non-Windows ([crbug 420689824](https://issues.chromium.org/issues/420689824)),
+makes it worse.
+
+**The patch.** esp-web-tools assigns its `ESPLoader` to `window.esploader` as a
+debug hook, synchronously after construction and before `main()` runs. The page
+installs an accessor on `window.esploader` *before* the module loads; the setter
+replaces `loader.resetConstructors.classicReset` with a strategy that performs
+each edge as one combined
+`port.setSignals({dataTerminalReady, requestToSend})` on the raw `SerialPort`,
+bypassing `Transport.setRTS()`'s extra call. Seven round-trips become three.
+
+`constructResetSequence()` builds exactly two strategy objects (resetDelay 50
+and 550) and `connect()` cycles them over 7 attempts, so there is no way to add
+entries to that array from outside; instead the strategies share a counter and
+alternate — two combined-signal attempts, then one stock split-signal attempt,
+repeating (5 combined and 2 stock across the 7 tries).
+
+**It narrows the window; it does not close it.** With `SerialSplitDtrAndRts`
+enabled Chrome still splits a combined `setSignals()` into two sequential
+blocking CH340 control transfers, so an intermediate (DTR=1, RTS=1) state
+remains — just far shorter, with no IPC round-trip inside it. Treat this as a
+large reliability improvement, not a guarantee. The deterministic paths are the
+firmware-side download escape hatch and the command line below.
+
+**Failure safety.** Every step is guarded: if the debug hook is gone, if
+`resetConstructors.classicReset` is missing, or if `transport.device` is not a
+`SerialPort` with `setSignals`, the patch returns the stock object and
+esp-web-tools behaves exactly as shipped. It cannot make an install that would
+have worked fail.
+
+**Exact-version pin.** The script tag names `esp-web-tools@10.4.0`, not `@10`.
+The patch depends on bundle internals, so it must not follow a minor bump
+silently. On upgrade, fetch
+`https://unpkg.com/esp-web-tools@<version>/dist/web/install-button.js` and the
+`install-dialog-*.js` chunk it imports, and re-verify:
+
+1. `window.esploader = <ESPLoader>` is still assigned synchronously right after
+   construction and before `.main()` is awaited;
+2. `resetConstructors` is still a plain instance property
+   `{classicReset, customReset, hardReset, usbJTAGSerialReset}`, and
+   `constructResetSequence()` still reads `resetConstructors.classicReset`
+   lazily, calls it as `(transport, resetDelay)`, and uses the result only via
+   `await strategy.reset()`;
+3. `Transport#device` is still the raw WebSerial `SerialPort`;
+4. the failure UX hooks still hold — `ESPLoader#main()` rejects on a failed
+   connect, and the install button still reports port-open errors via `alert()`.
+   (Note that in 10.4.0 `<esp-web-install-button>` fires **no** events; the
+   `state-changed` event in that bundle belongs to the Improv serial client.)
+
+If esptool-js has merged the fix, delete the patch instead of porting it.
+
+**The error UX.** esp-web-tools' failure message tells the user to hold a BOOT
+button — which no board on this page has. The page therefore keeps its own
+`<details id="trouble">` guidance box, opened and scrolled to automatically when
+a connect fails: press RESET and retry, retry a few times, reload the page
+between attempts (a failed connect can leave the port open, and the next attempt
+dies with "port already open"), confirm the Inkplate's power switch is on and
+its blue LED lit, use a data USB-C cable with no hub, close other apps holding
+the port, install WCH's `CH34xVPCDriver` on macOS (Apple's bundled CH34x driver
+does **not** work with this CH340K — see
+[the Soldered thread](https://community.soldered.com/t/how-to-get-mac-to-see-inkplate-13-spectra/130)),
+and, for the stubborn cases, relaunch Chrome with
+`--disable-features=SerialSplitDtrAndRts`.
+
+### Flashing from the command line
+
+The reliable fallback, and what to reach for when the browser will not
+cooperate. Download the variant's `*.factory.bin` from the
+[release page](https://github.com/GoogleBot42/stillframe/releases) and, with
+Python `esptool` installed:
+
+```bash
+esptool --chip esp32s3 --port /dev/ttyUSB0 --baud 921600 \
+  --before default-reset --after hard-reset \
+  write-flash -z --flash-mode keep --flash-freq keep --flash-size keep \
+  0x0 <name>.factory.bin
+```
+
+Those are Soldered's own upload parameters for the Inkplate 13 Spectra (from
+their `boards.txt` / `platform.txt`). `--chip esp32s3` covers the TinyS3 and
+Inkplate builds; use `--chip esp32` for the TinyPico ones. Notes:
+
+- A factory image is written at offset `0x0` — it contains the bootloader and
+  partition table. The `*.ota.bin` files are **not** flashable this way.
+- Errors partway through a write usually mean the bridge cannot keep up: drop
+  `--baud` to `115200`.
+- If it cannot connect at all, use `--before no-reset` and press the board's
+  RESET button as esptool prints `Connecting....`.
+- The command above is esptool v5 syntax. On v4 the binary is `esptool.py` and
+  the names use underscores: `write_flash`, `--before default_reset`,
+  `--after hard_reset`.
+- Python esptool succeeds where browsers fail because on Linux and macOS its
+  `UnixTightReset` sets DTR and RTS in one atomic `TIOCMSET` ioctl — the whole
+  problem the patch above works around.
+
 ## Working on the page locally
 
 `site/index.html` is a single self-contained file. Open it directly to check

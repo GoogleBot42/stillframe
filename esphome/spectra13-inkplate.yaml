@@ -30,9 +30,18 @@ psram:
 packages:
   common: !include common.yaml
 
-# The Inkplate 13 Spectra's USB-C port goes through a CH340C USB-UART bridge
+# The Inkplate 13 Spectra's USB-C port goes through a CH340K USB-UART bridge
 # wired to UART0, not to the ESP32-S3's native USB — so override the S3 default
 # (USB_SERIAL_JTAG) or nothing (logs, Improv provisioning) reaches the port.
+#
+# That same bridge is why `flashing_mode:` (see common.yaml) matters most on
+# this board: the CH340K's RTS# has only weak high-side drive against the IO0
+# pull-up, the board has no BOOT button and does not break IO0 out anywhere,
+# and browsers cannot drive DTR/RTS in one atomic step the way esptool does —
+# so the auto-download circuit is a coin flip. Rebooting into the ROM
+# downloader from software ("Enter Flashing Mode", or an 8 s hold of WAKE) is
+# the deterministic way to reflash it; the board's only other controls are
+# POWER and RESET.
 logger:
   hardware_uart: UART0
 

@@ -9,10 +9,225 @@
   content="Install Stillframe e-ink picture frame firmware straight from your browser."
 />
 
-<!-- esp-web-tools is loaded from unpkg; pinned to the v10 major line. -->
+<!--
+  esp-web-tools is loaded from unpkg, pinned to an EXACT version rather than to
+  the `@10` range. The reset patch in the script below reaches into the bundle's
+  internals, so a silent minor bump could change them underneath us. The patch
+  is written to no-op (leaving stock behaviour) if anything it expects is
+  missing, but a pin means we find out deliberately instead of by report.
+
+  When bumping the version, re-verify against the real dist files — fetch
+  `https://unpkg.com/esp-web-tools@<version>/dist/web/install-button.js` plus the
+  `install-dialog-*.js` chunk it imports, and check that:
+    1. `window.esploader = <ESPLoader>` is still assigned synchronously right
+       after construction and BEFORE `.main()` is awaited (a debug hook);
+    2. `ESPLoader#resetConstructors` still exists as a plain instance property
+       `{classicReset, customReset, hardReset, usbJTAGSerialReset}`, and
+       `constructResetSequence()` still reads `this.resetConstructors.classicReset`
+       lazily, calling it as `(transport, resetDelay)` and using the returned
+       object only via `await strategy.reset()`;
+    3. `Transport#device` is still the raw WebSerial `SerialPort`;
+    4. upstream has not fixed esptool-js#222 itself — if it has, delete the patch.
+  See site/README.md, "Why the install page patches esp-web-tools".
+-->
+<script>
+  /*
+   * Combined-signal reset patch for esp-web-tools 10.4.0 / esptool-js 0.6.x.
+   *
+   * PROBLEM. esptool-js's ClassicReset drives the CH340 auto-reset circuit with
+   * one WebSerial call per signal:
+   *
+   *     setDTR(false); setRTS(true);  wait 100ms;
+   *     setDTR(true);  setRTS(false); wait resetDelay;
+   *     setDTR(false)
+   *
+   * and `Transport.setRTS()` internally issues a *second* `setSignals()` (a
+   * redundant re-assert of DTR, a Windows workaround) — so a single reset costs
+   * seven `setSignals()` round-trips. The ESP32-S3 latches its boot straps
+   * within ~3ms of EN rising, and the split `setDTR(true)` / `setRTS(false)`
+   * transition passes through the intermediate state (DTR=1, RTS=1) — EN
+   * released while IO0 is still high — so the chip boots the app instead of the
+   * ROM downloader. Python esptool does not have this problem because
+   * UnixTightReset sets both modem lines in one `TIOCMSET` ioctl.
+   *
+   * Refs: espressif/esptool-js#222 (open) and PR espressif/esptool-js#225
+   * (unmerged) — this patch follows PR #225's semantics.
+   *
+   * FIX. Replace the strategy object with one that performs each edge as a
+   * single combined `port.setSignals({dataTerminalReady, requestToSend})` on the
+   * raw SerialPort, bypassing `Transport.setRTS()`'s extra call: 7 round-trips
+   * become 3, and the renderer<->browser IPC gap between the two halves of the
+   * critical transition disappears.
+   *
+   * HONEST LIMITS. This narrows the glitch window dramatically; it does not
+   * close it. Chromium's `SerialSplitDtrAndRts` feature (on by default from 141
+   * on non-Windows, crbug 420689824) splits even a combined `setSignals()` into
+   * two sequential blocking CH340 USB control transfers, so an intermediate
+   * (DTR=1, RTS=1) window still exists — it is just far shorter, and no longer
+   * has an IPC round-trip inside it. Retrying, and the firmware-side download
+   * escape hatch, remain the deterministic paths.
+   *
+   * FAILURE SAFETY. Everything here is best-effort. If the debug hook, the
+   * reset constructors, or `transport.device` are not shaped as expected, the
+   * patch returns without touching anything and esp-web-tools behaves exactly
+   * as shipped. Nothing here can prevent a stock install from proceeding.
+   */
+  (function () {
+    "use strict";
+
+    var TAG = "[stillframe]";
+    var loaderRef; // backing store for the window.esploader debug hook
+    var attemptCounter = 0;
+
+    function sleep(ms) {
+      return new Promise(function (resolve) {
+        setTimeout(resolve, ms);
+      });
+    }
+
+    // The UnixTightReset ladder, one setSignals() per edge.
+    // (DTR=false, RTS=true)  -> IO0 high, EN low   : hold the chip in reset
+    // (DTR=true,  RTS=false) -> IO0 low,  EN high  : release EN with IO0 already low
+    // (DTR=false, RTS=false) -> IO0 high           : let go of the strap
+    async function combinedReset(transport, resetDelay) {
+      var port = transport.device; // raw WebSerial SerialPort
+      await port.setSignals({ dataTerminalReady: false, requestToSend: true });
+      await sleep(100);
+      await port.setSignals({ dataTerminalReady: true, requestToSend: false });
+      await sleep(resetDelay);
+      await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+      // Keep the Transport's shadow copy of DTR honest: setRTS() re-applies it,
+      // and hardReset() runs through setRTS() after flashing.
+      if ("_DTR_state" in transport) transport._DTR_state = false;
+    }
+
+    /*
+     * A retry ladder, within what the bundle actually supports.
+     *
+     * `constructResetSequence()` builds exactly two strategy objects from
+     * `resetConstructors.classicReset` — one with resetDelay 50, one with 550 —
+     * and `connect()` cycles through them over 7 attempts. There is no way to
+     * add entries to that array from outside, but each attempt calls
+     * `strategy.reset()` afresh, so a counter shared by both objects lets us
+     * vary the strategy per attempt: two combined-signal tries, then one stock
+     * split-signal try, repeating. Over the 7 attempts that is 5 combined and 2
+     * stock — the fix gets most of the tries, while a board that somehow only
+     * likes the stock timing still gets its chance.
+     */
+    function makeStrategy(transport, resetDelay, stock) {
+      return {
+        reset: async function () {
+          var n = attemptCounter++;
+          if (n % 3 !== 2) {
+            try {
+              await combinedReset(transport, resetDelay);
+              return;
+            } catch (err) {
+              console.warn(TAG + " combined reset failed, using stock", err);
+            }
+          }
+          await stock.reset();
+        },
+      };
+    }
+
+    function patchLoader(loader) {
+      if (!loader || typeof loader !== "object") return;
+      var constructors = loader.resetConstructors;
+      if (!constructors || typeof constructors.classicReset !== "function") {
+        return; // shape changed upstream — leave stock behaviour alone
+      }
+      var stockFactory = constructors.classicReset;
+      constructors.classicReset = function (transport, resetDelay) {
+        var stock = stockFactory(transport, resetDelay);
+        var port = transport && transport.device;
+        if (!port || typeof port.setSignals !== "function" || !stock) {
+          return stock; // nothing to improve on — hand back what esptool-js made
+        }
+        return makeStrategy(transport, resetDelay, stock);
+      };
+      attemptCounter = 0;
+      console.info(TAG + " combined-signal reset patch active");
+    }
+
+    // Reveal our own guidance when a connect attempt fails. esp-web-tools 10.4.0
+    // exposes no events for this (its `state-changed` event belongs to the
+    // Improv serial client, not to <esp-web-install-button>), so we hang off the
+    // same debug hook: if ESPLoader.main() rejects, the connect failed, and the
+    // dialog is about to tell the user to hold a BOOT button this board lacks.
+    function watchForConnectFailure(loader) {
+      if (!loader || typeof loader.main !== "function") return;
+      var originalMain = loader.main.bind(loader);
+      loader.main = function () {
+        var result;
+        try {
+          result = originalMain.apply(null, arguments);
+        } catch (err) {
+          showTrouble();
+          throw err;
+        }
+        if (result && typeof result.then === "function") {
+          return result.then(null, function (err) {
+            showTrouble();
+            throw err;
+          });
+        }
+        return result;
+      };
+    }
+
+    function showTrouble() {
+      try {
+        var box = document.getElementById("trouble");
+        if (!box) return;
+        box.open = true;
+        box.classList.add("trouble--flagged");
+        box.scrollIntoView({ block: "center", behavior: "smooth" });
+      } catch (err) {
+        /* guidance is a nicety; never let it break the install */
+      }
+    }
+
+    try {
+      Object.defineProperty(window, "esploader", {
+        configurable: true,
+        enumerable: false,
+        get: function () {
+          return loaderRef;
+        },
+        set: function (loader) {
+          loaderRef = loader;
+          try {
+            patchLoader(loader);
+          } catch (err) {
+            console.warn(TAG + " reset patch not applied", err);
+          }
+          try {
+            watchForConnectFailure(loader);
+          } catch (err) {
+            /* ignore */
+          }
+        },
+      });
+    } catch (err) {
+      console.warn(TAG + " could not install the esploader hook", err);
+    }
+
+    // The install button opens the serial port itself and reports failures with
+    // a bare alert() — including the "port is already open" wedge left behind by
+    // a previous failed attempt. Surface the guidance alongside it.
+    var nativeAlert = window.alert;
+    if (typeof nativeAlert === "function") {
+      window.alert = function () {
+        showTrouble();
+        return nativeAlert.apply(window, arguments);
+      };
+    }
+  })();
+</script>
 <script
   type="module"
-  src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"
+  src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"
 ></script>
 
 <style>
@@ -181,6 +396,52 @@
     display: inline-block;
   }
 
+  .trouble {
+    margin-top: 1.5rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: 10px;
+    padding: 0.9rem 1.25rem;
+    font-size: 0.95rem;
+  }
+
+  .trouble[open] {
+    padding-bottom: 1.1rem;
+  }
+
+  .trouble--flagged {
+    border-left-color: var(--accent);
+  }
+
+  .trouble > summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--muted);
+  }
+
+  .trouble[open] > summary {
+    margin-bottom: 0.8rem;
+    color: var(--text);
+  }
+
+  .trouble ul {
+    margin: 0;
+    padding-left: 1.2rem;
+  }
+
+  .trouble li {
+    margin-bottom: 0.6rem;
+  }
+
+  .trouble li:last-child {
+    margin-bottom: 0;
+  }
+
+  .trouble p {
+    margin: 0 0 0.9rem;
+  }
+
   code {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.9em;
@@ -298,7 +559,8 @@
         <h3>13.3" Spectra 6 — Inkplate 13</h3>
         <p>
           EL133UF1 Spectra 6, 1600 &times; 1200, 6 colours. Soldered Inkplate 13
-          Spectra (ESP32-S3).
+          Spectra (ESP32-S3). Slide its power switch to ON — the blue LED must
+          be lit, or the board never appears as a serial port.
         </p>
         <span class="device-meta" data-version></span>
       </div>
@@ -316,10 +578,77 @@
     </div>
   </div>
 
+  <details class="trouble" id="trouble">
+    <summary>Install didn't take? Read this first.</summary>
+
+    <p>
+      Getting an ESP32-S3 into its download mode from a browser is a timing
+      race, and USB-serial bridges lose it now and then. Nothing is broken —
+      work down this list.
+    </p>
+
+    <ul>
+      <li>
+        <strong>Ignore any advice about a BOOT button.</strong> esp-web-tools
+        shows a generic message telling you to hold one; these boards don't have
+        one. Press <strong>RESET</strong> instead, and click
+        <strong>Install</strong> again the moment you let go.
+      </li>
+      <li>
+        <strong>Just try again, two or three times.</strong> Each attempt is an
+        independent roll — a run that fails twice often lands on the third.
+      </li>
+      <li>
+        <strong>Reload this page between attempts.</strong> After a failed
+        connect the serial port can be left open, and the next attempt then dies
+        immediately with "port is already open". A reload clears it.
+      </li>
+      <li>
+        <strong>Check the power switch.</strong> The Inkplate 13 Spectra has
+        one, and its blue LED must be lit — with the board off there is no
+        serial port to pick at all.
+      </li>
+      <li>
+        <strong>Use a USB-C data cable, plugged straight in.</strong> Charge-only
+        cables carry no data, and hubs and docks add latency that loses the race.
+      </li>
+      <li>
+        <strong>Close anything else holding the port</strong> — serial monitors,
+        the ESPHome dashboard, Arduino IDE, PlatformIO, a second browser tab of
+        this page.
+      </li>
+      <li>
+        <strong>On macOS, install the WCH driver.</strong> Apple's bundled CH34x
+        driver does not work with this board's CH340K bridge. Install WCH's
+        <code>CH34xVPCDriver</code>, then enable it under <em>System Settings
+        &rarr; General &rarr; Login Items &amp; Extensions</em> and replug.
+      </li>
+      <li>
+        <strong>Advanced:</strong> quit Chrome completely and relaunch it with
+        <code>--disable-features=SerialSplitDtrAndRts</code>. Chrome 141 and
+        later split the reset pulse into two USB transfers, which makes the race
+        harder to win.
+      </li>
+      <li>
+        <strong>Last resort:</strong> flash from a terminal with
+        <code>esptool</code> — it drives the reset lines in one atomic system
+        call and effectively always works. The recipe is in the
+        <a
+          href="https://github.com/GoogleBot42/stillframe/blob/main/site/README.md#flashing-from-the-command-line"
+          >project README</a
+        >.
+      </li>
+    </ul>
+  </details>
+
   <h2>How it goes</h2>
 
   <ol class="steps">
-    <li>Plug the board into your computer with a USB data cable.</li>
+    <li>
+      Plug the board into your computer with a USB data cable, and switch it on
+      if it has a power switch — an Inkplate 13 Spectra will not show up as a
+      serial port until its blue power LED is lit.
+    </li>
     <li>
       Pick your device above and press <strong>Install</strong>, then choose the
       board's serial port in the browser dialog.

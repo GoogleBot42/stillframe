@@ -75,6 +75,16 @@ wifi:
 
 improv_serial:
 
+# Pulls in enter_flashing_mode(), which reboots the chip into the ESP32 ROM's
+# serial downloader. That is the *reflash* escape hatch, the counterpart to
+# Improv above: it needs no BOOT button, no strapping pin and no DTR/RTS
+# timing, which is what makes reflashing a board like the Inkplate 13 Spectra
+# (no BOOT button, IO0 not broken out, a marginal auto-download circuit, and a
+# browser that cannot drive DTR/RTS atomically anyway) reliable at all.
+# Exposed as the "Enter Flashing Mode" button and as an 8 s hold of the wake
+# button; see both below.
+flashing_mode:
+
 api:
   # reboot_timeout 0: the default is 15 minutes, which would reboot any frame
   # that is not currently connected to Home Assistant — i.e. every frame that
@@ -219,6 +229,15 @@ binary_sensor:
       allow_other_uses: true
     name: "Wake Button"
     id: wake_button
+    # Hold for 8 s to reboot into flashing mode — the no-Home-Assistant version
+    # of the "Enter Flashing Mode" button below, and the only way back into a
+    # frame that is unprovisioned, unadopted or otherwise unreachable. The hold
+    # is timed by the flashing_mode_hold script; see it for how this coexists
+    # with the button's two existing jobs.
+    on_press:
+      - script.execute: flashing_mode_hold
+    on_release:
+      - script.stop: flashing_mode_hold
 
 button:
   - platform: template
@@ -226,6 +245,19 @@ button:
     id: fetch_image_now
     on_press:
       - script.execute: fetch_and_display
+  # Recovery path for boards without a BOOT button: reboot into the ROM serial
+  # downloader (see the `flashing_mode:` block above). The frame stops being a
+  # frame until it is reset — the ROM downloader does nothing but wait for
+  # esptool — so getting out is the RESET button or a power cycle (both reset
+  # the RTC domain the bit lives in; esptool also clears it after flashing, and
+  # the component clears it on every boot).
+  - platform: template
+    name: "Enter Flashing Mode"
+    id: enter_flashing_mode_button
+    icon: mdi:usb-flash-drive
+    entity_category: config
+    on_press:
+      - lambda: flashing_mode::enter_flashing_mode();
 
 script:
   - id: fetch_and_display
@@ -383,3 +415,39 @@ script:
                               float m = id(sleep_minutes).state;
                               if (!(m >= 1.0f)) m = ${default_sleep_minutes};
                               return (uint32_t) (m * 60000.0f);
+
+  # Wake-button hold -> flashing mode. Started by the button's on_press and
+  # killed by its on_release, so only an uninterrupted 8 s hold gets to the end.
+  #
+  # The hold is only counted while the firmware is RUNNING. In deep sleep the
+  # button is a wake source and the press that wakes the frame is consumed by
+  # the wake itself, so the user flow is "press WAKE, then keep holding": the
+  # GPIO binary sensor publishes its initial state during setup, which fires
+  # on_press for a button that is already down when the app starts, and the 8 s
+  # are timed from there.
+  #
+  # This does not disturb either existing use of the button, because both are
+  # over in about a second:
+  #   - a short press wakes the frame (deep_sleep wakeup_pin, KEEP_AWAKE);
+  #   - holding it through a reset opens an OTA window by turning on "Prevent
+  #     Deep Sleep" (see on_boot) and only needs to be held until that logs.
+  # Nothing else can reach 8 s by accident, and the warning at 3 s says out loud
+  # what is about to happen while there is still time to let go.
+  #
+  # Timing is best-effort: a blocking main loop (an image download, a panel
+  # refresh) postpones the delays rather than cancelling them, so on a busy
+  # boot the reboot can land after the refresh instead of exactly at 8 s. The
+  # frame cannot fall asleep out from under the hold in the meantime: while the
+  # wake pin reads active, `wakeup_pin_mode: KEEP_AWAKE` makes every
+  # deep_sleep.enter defer (and holding at boot has already turned on "Prevent
+  # Deep Sleep" anyway — which stays on afterwards, keeping the freshly
+  # reflashed frame awake until it is switched off from Home Assistant).
+  - id: flashing_mode_hold
+    mode: restart
+    then:
+      - delay: 3s
+      - logger.log:
+          format: "Wake button held — keep holding for flashing mode"
+          level: WARN
+      - delay: 5s
+      - lambda: flashing_mode::enter_flashing_mode();
