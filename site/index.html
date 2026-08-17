@@ -589,10 +589,19 @@
 
     <ul>
       <li>
-        <strong>Ignore any advice about a BOOT button.</strong> esp-web-tools
-        shows a generic message telling you to hold one; these boards don't have
-        one. Press <strong>RESET</strong> instead, and click
-        <strong>Install</strong> again the moment you let go.
+        <strong>The "hold the BOOT button" advice depends on your board.</strong>
+        <em>TinyS3</em>: it has one — hold <strong>BOOT</strong>, tap
+        <strong>RESET</strong>, release BOOT, then click Install; that enters
+        download mode every time. <em>TinyPico</em> and <em>Inkplate 13
+        Spectra</em>: there is no BOOT button — press <strong>RESET</strong>
+        and click <strong>Install</strong> again the moment you let go.
+      </li>
+      <li>
+        <strong>Already running Stillframe v1.0.1 or newer?</strong> Then skip
+        the timing race entirely: hold the <strong>WAKE</strong> button for
+        ~8&nbsp;seconds (or press the "Enter Flashing Mode" button in Home
+        Assistant) and the board reboots itself into download mode, waiting
+        for this installer — no RESET dance needed.
       </li>
       <li>
         <strong>Just try again, two or three times.</strong> Each attempt is an
