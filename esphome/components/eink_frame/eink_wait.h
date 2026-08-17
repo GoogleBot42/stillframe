@@ -36,9 +36,16 @@ namespace eink_frame {
 void feed_watchdog();
 
 // Poll `pin` until it reads `ready_level`, feeding the watchdog while waiting.
-// Returns false (and logs under `tag`) on timeout; `what` names the pin in that
-// message, e.g. "busy pin" or "HRDY".
-bool wait_for_pin(GPIOPin *pin, bool ready_level, uint32_t timeout_ms, const char *tag, const char *what);
+// Returns false on timeout.
+//
+// `phase` names what is being waited for and is the first thing in both the
+// success (verbose) and the timeout (error) log line, so make it specific
+// enough to identify the call site in a hardware log — e.g.
+// "panel power-up (PON)" rather than "busy pin". The timeout message also
+// reports how long was waited and the level actually read, and `hint`, if
+// given, is logged as a follow-up line suggesting what to check on the bench.
+bool wait_for_pin(GPIOPin *pin, bool ready_level, uint32_t timeout_ms, const char *tag, const char *phase,
+                  const char *hint = nullptr);
 
 }  // namespace eink_frame
 }  // namespace esphome
