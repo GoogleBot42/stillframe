@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"image"
@@ -210,6 +211,251 @@ func TestHandlersAcceptTheLargestShippedGeometry(t *testing.T) {
 	}
 	if want := 1872 * 1404 / 2; rec.Body.Len() != want {
 		t.Errorf("got %d bytes, want %d", rec.Body.Len(), want)
+	}
+}
+
+// paletteOfSize builds a valid color space of n entries. Codes repeat every 16
+// because that is all a nibble holds, which is exactly why the entry count and
+// the code range are bounded separately.
+func paletteOfSize(n int) ColorSpace {
+	cs := make(ColorSpace, n)
+	for i := range cs {
+		v := float64(i%16) / 15.0
+		cs[i].Color = Colorf{v, v, v}
+		cs[i].Code = uint8(i % 16)
+	}
+	return cs
+}
+
+// The endpoints are unauthenticated, so nothing but a hard cap stops an
+// arbitrary body: 200 000 color_space entries were accepted, which extrapolated
+// to ~52 minutes of CPU for a single 1872x1404 fetch.
+//
+// The "after the object" case is the one json.Decoder does not catch by
+// itself: it stops at the end of the first value, so the padding is never read
+// and the cap is never reached unless the handler insists the object is the
+// whole body.
+func TestHandlersRejectOversizeBody(t *testing.T) {
+	silenceStdout(t)
+	const valid = `{"width":8,"height":4,"color_space":[{"color_code":0,"rgb_color":[0,0,0]}]`
+	padding := strings.Repeat("x", maxBodyBytes)
+	bodies := map[string]string{
+		"padding inside the object": valid + `,"padding":"` + padding + `"}`,
+		"padding after the object":  valid + `}"` + padding + `"`,
+	}
+	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
+		for name, body := range bodies {
+			t.Run(ep+"/"+name, func(t *testing.T) {
+				rec := postRaw(t, ep, body)
+				if rec.Code != http.StatusRequestEntityTooLarge {
+					t.Errorf("status %d, want 413 (body %q)", rec.Code, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
+// A second JSON value after the first is not a frame talking; it is the shape
+// a body-cap bypass takes, so it is a bad request even when it is small.
+func TestHandlersRejectTrailingContent(t *testing.T) {
+	silenceStdout(t)
+	const valid = `{"width":8,"height":4,"color_space":[{"color_code":0,"rgb_color":[0,0,0]}]}`
+	bodies := map[string]string{
+		"second object": valid + valid,
+		"junk":          valid + "garbage",
+		"array":         valid + "[1,2,3]",
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			rec := postRaw(t, "/clearImage", body)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status %d, want 400 (body %q)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	// Trailing whitespace is not trailing content.
+	if rec := postRaw(t, "/clearImage", valid+"\n"); rec.Code != http.StatusOK {
+		t.Errorf("a trailing newline was rejected: status %d, body %q", rec.Code, rec.Body.String())
+	}
+}
+
+// Each side can be inside the per-side cap while the product is absurd:
+// 10000x10000 answered 200 with a 50 MB body and ~350 MiB of heap, enough to
+// OOM the 256 MiB service VM.
+func TestHandlersRejectTooManyPixels(t *testing.T) {
+	silenceStdout(t)
+	cases := map[string]ImageProperties{
+		"square":     {Width: maxDimension, Height: maxDimension, ColorSpace: epd7in3fPalette},
+		"just over":  {Width: 4000, Height: maxPixels/4000 + 1, ColorSpace: epd7in3fPalette},
+		"long strip": {Width: maxDimension, Height: maxPixels/maxDimension + 1, ColorSpace: epd7in3fPalette},
+	}
+	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
+		for name, props := range cases {
+			t.Run(ep+"/"+name, func(t *testing.T) {
+				rec := postJSON(t, ep, props)
+				if rec.Code != http.StatusBadRequest {
+					t.Errorf("status %d, want 400 (body %q)", rec.Code, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
+// The cap itself is still served — it is a bound, not a panel list.
+func TestClearImageAcceptsTheMaximumPixelCount(t *testing.T) {
+	silenceStdout(t)
+	const w, h = 4000, maxPixels / 4000
+	rec := postJSON(t, "/clearImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
+	}
+	if want := w * h / 2; rec.Body.Len() != want {
+		t.Errorf("got %d bytes, want %d", rec.Body.Len(), want)
+	}
+}
+
+// The nearest-color search is linear in the palette, so an unbounded
+// color_space is a CPU amplifier even when the body itself is small.
+func TestHandlersRejectOversizeColorSpace(t *testing.T) {
+	silenceStdout(t)
+	props := ImageProperties{Width: 8, Height: 4, ColorSpace: paletteOfSize(maxColorSpaceEntries + 1)}
+	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
+		t.Run(ep, func(t *testing.T) {
+			rec := postJSON(t, ep, props)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status %d, want 400 (body %q)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandlersAcceptTheLargestAllowedColorSpace(t *testing.T) {
+	silenceStdout(t)
+	rec := postJSON(t, "/calibrationImage", ImageProperties{Width: 8, Height: 4, ColorSpace: paletteOfSize(maxColorSpaceEntries)})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
+	}
+}
+
+// A pixel is a nibble. A wider code used to be packed anyway: 0xF0 wrote
+// nothing of its own and clobbered the neighbouring pixel instead, so a bad
+// palette produced a plausible-but-wrong image rather than an error.
+func TestHandlersRejectOutOfRangeColorCode(t *testing.T) {
+	silenceStdout(t)
+	cases := map[string]uint8{
+		"one past the nibble": maxColorCode + 1,
+		"whole byte":          0xFF,
+		"high nibble only":    0xF0,
+	}
+	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
+		for name, code := range cases {
+			t.Run(ep+"/"+name, func(t *testing.T) {
+				cs := ColorSpace{{Colorf{0, 0, 0}, 0}, {Colorf{1, 1, 1}, code}}
+				rec := postJSON(t, ep, ImageProperties{Width: 8, Height: 4, ColorSpace: cs})
+				if rec.Code != http.StatusBadRequest {
+					t.Errorf("status %d, want 400 (body %q)", rec.Code, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
+// uint8(channel*255) is implementation-defined outside [0, 1] — measured -5 ->
+// 5, 300 -> 212, 1e9 -> 0 — so an out-of-range channel silently matches pixels
+// against a color nobody asked for.
+func TestHandlersRejectOutOfRangeRGBColor(t *testing.T) {
+	silenceStdout(t)
+	cases := map[string]Colorf{
+		"negative":       {-5, 0, 0},
+		"slightly under": {0, -0.0001, 0},
+		"just over one":  {0, 0, 1.0001},
+		"far over":       {300, 0, 0},
+		"absurd":         {0, 1e9, 0},
+	}
+	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
+		for name, c := range cases {
+			t.Run(ep+"/"+name, func(t *testing.T) {
+				cs := ColorSpace{{Colorf{0, 0, 0}, 0}, {c, 1}}
+				rec := postJSON(t, ep, ImageProperties{Width: 8, Height: 4, ColorSpace: cs})
+				if rec.Code != http.StatusBadRequest {
+					t.Errorf("status %d, want 400 (body %q)", rec.Code, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
+// The bounds must not cost a real frame its picture: this is the byte-for-byte
+// body the EPD7IN3F driver sends.
+func TestHandlersAcceptTheFirmwareRequestBody(t *testing.T) {
+	silenceStdout(t)
+	for _, ep := range []string{"/calibrationImage", "/clearImage"} {
+		t.Run(ep, func(t *testing.T) {
+			rec := postRaw(t, ep, firmwareRequestBody)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
+			}
+			if want := 800 * 480 / 2; rec.Body.Len() != want {
+				t.Errorf("got %d bytes, want %d", rec.Body.Len(), want)
+			}
+		})
+	}
+}
+
+// maxBodyBytes is justified against the biggest body any shipped panel sends —
+// the 16-entry grey16 palette — so that is the one that has to be measured,
+// and with room to spare rather than merely fitting.
+func TestTheLargestFirmwareBodyFitsTheByteCap(t *testing.T) {
+	props := ImageProperties{Width: 1872, Height: 1404, ColorSpace: grey16Palette()}
+	if got := mustJSON(t, props).Len(); got > maxBodyBytes/2 {
+		t.Errorf("the grey16 request body is %d bytes, over half the %d byte cap", got, maxBodyBytes)
+	}
+}
+
+// A conversion costs hundreds of MB, so the number in flight has to be bounded
+// or N frames waking on the same minute multiply the peak by N. With every
+// slot taken, a caller that has already given up is answered rather than
+// queued behind work it will never read.
+func TestImageRequestsAreConcurrencyLimited(t *testing.T) {
+	silenceStdout(t)
+	for i := 0; i < maxConcurrentRequests; i++ {
+		imageSlots <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < maxConcurrentRequests; i++ {
+			<-imageSlots
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/clearImage",
+		mustJSON(t, ImageProperties{Width: 8, Height: 4, ColorSpace: epd7in3fPalette})).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	newTestRouter().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status %d, want 503 (body %q)", rec.Code, rec.Body.String())
+	}
+}
+
+// Every exit from a handler has to give the slot back — a rejected request
+// most of all, since those are the cheap ones to send in bulk. A leak here
+// wedges the server after maxConcurrentRequests bad requests, so this test
+// hangs rather than fails if the release is dropped.
+func TestConcurrencySlotsAreReleasedByRejectedRequests(t *testing.T) {
+	silenceStdout(t)
+	for i := 0; i < maxConcurrentRequests+2; i++ {
+		rec := postJSON(t, "/clearImage", ImageProperties{Width: 0, Height: 0, ColorSpace: epd7in3fPalette})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("request %d: status %d, want 400", i, rec.Code)
+		}
+	}
+	if rec := postJSON(t, "/clearImage", ImageProperties{Width: 8, Height: 4, ColorSpace: epd7in3fPalette}); rec.Code != http.StatusOK {
+		t.Fatalf("status %d after the rejected requests, want 200", rec.Code)
+	}
+	if len(imageSlots) != 0 {
+		t.Errorf("%d slots are still held", len(imageSlots))
 	}
 }
 
