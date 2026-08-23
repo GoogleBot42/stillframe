@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 	"testing"
+
+	"github.com/mattn/go-ciede2000"
 )
 
 // ===========================================================================
@@ -560,6 +563,98 @@ func TestGenerateClearImageEmptyColorSpace(t *testing.T) {
 func TestGenerateClearImageZeroSize(t *testing.T) {
 	if got := mustClearImage(t, 0, 0, epd7in3fPalette); got != nil {
 		t.Errorf("expected nil for a 0x0 image, got %#v", got)
+	}
+}
+
+// ===========================================================================
+// paletteMatcher
+// ===========================================================================
+
+// The matcher is a pure optimization: for every representable 8-bit input it
+// must pick the same entry as the unmemoized per-call form it replaced (Diff on
+// two RGBA values, i.e. an sRGB->Lab conversion of both arguments every call).
+func TestPaletteMatcherMatchesUnmemoizedDiff(t *testing.T) {
+	// Deterministic LCG (Numerical Recipes constants) so the samples spread
+	// through the whole 8-bit cube rather than along a periodic lattice.
+	state := uint32(1)
+	nextChannel := func() float64 {
+		state = state*1664525 + 1013904223
+		return float64(state>>24) / 255
+	}
+
+	for _, palette := range []ColorSpace{epd7in3fPalette, el133uf1Palette, grey16Palette(), bwPalette} {
+		matcher := newPaletteMatcher(palette)
+		for i := 0; i < 4500; i++ {
+			target := Colorf{nextChannel(), nextChannel(), nextChannel()}
+
+			wantCode, wantColor := func() (uint8, Colorf) {
+				minDist := math.MaxFloat64
+				code, best := uint8(0), Colorf{0, 0, 0}
+				for _, def := range palette {
+					if dist := ciede2000.Diff(convertToRGBA(target), convertToRGBA(def.Color)); dist < minDist {
+						minDist = dist
+						code, best = def.Code, def.Color
+					}
+				}
+				return code, best
+			}()
+
+			gotCode, gotColor := matcher.nearest(target)
+			if gotCode != wantCode || gotColor != wantColor {
+				t.Fatalf("matcher.nearest(%v) = code %d %v, brute force = code %d %v",
+					target, gotCode, gotColor, wantCode, wantColor)
+			}
+			// The second query answers from the cache and must agree.
+			if code, c := matcher.nearest(target); code != gotCode || c != gotColor {
+				t.Fatalf("cached matcher.nearest(%v) = code %d %v, first answer was code %d %v",
+					target, code, c, gotCode, gotColor)
+			}
+		}
+	}
+}
+
+// Repeated queries must come from the cache without drifting, including targets
+// that only differ below 8-bit precision (same truncated key).
+func TestPaletteMatcherCacheIsStable(t *testing.T) {
+	matcher := newPaletteMatcher(epd7in3fPalette)
+	firstCode, firstColor := matcher.nearest(Colorf{0.5, 0.25, 0.75})
+	for i := 0; i < 3; i++ {
+		code, c := matcher.nearest(Colorf{0.5 + 1e-9, 0.25, 0.75})
+		if code != firstCode || c != firstColor {
+			t.Fatalf("repeat query drifted: got code %d %v, want %d %v", code, c, firstCode, firstColor)
+		}
+	}
+}
+
+func TestPaletteMatcherEmptyColorSpace(t *testing.T) {
+	code, c := newPaletteMatcher(ColorSpace{}).nearest(Colorf{0.9, 0.9, 0.9})
+	if code != 0 || c != (Colorf{0, 0, 0}) {
+		t.Errorf("empty color space should yield black/code 0, got code %d %v", code, c)
+	}
+	code, c = nearestPaletteColor(ColorSpace{}, Colorf{0.9, 0.9, 0.9})
+	if code != 0 || c != (Colorf{0, 0, 0}) {
+		t.Errorf("nearestPaletteColor on an empty space should yield black/code 0, got code %d %v", code, c)
+	}
+}
+
+// The device-timeout-relevant path: quantize+dither a photo-like gradient at
+// panel resolution. Issue #15's before/after on this benchmark shape is
+// ~24 s -> ~0.8 s for grey16 1872x1404 with a 12 MP source; here the source is
+// already panel-sized so only the quantization cost is visible.
+func BenchmarkConvertToEInkImageGrey16(b *testing.B) {
+	img := gradientRGBA(1872, 1404)
+	palette := grey16Palette()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ConvertToEInkImage(img, palette)
+	}
+}
+
+func BenchmarkConvertToEInkImageColor7(b *testing.B) {
+	img := gradientRGBA(800, 480)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ConvertToEInkImage(img, epd7in3fPalette)
 	}
 }
 
