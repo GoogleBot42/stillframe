@@ -29,10 +29,12 @@ namespace eink_frame {
 // builds arduino-esp32 as an ESP-IDF component, so esp_task_wdt.h and the
 // task WDT exist either way); elsewhere this is a plain App.feed_wdt().
 //
-// NOTE: feeding is not a substitute for raising the watchdog around a call
-// that blocks *without* returning to us — for those, the timeout itself has to
-// be raised for the duration (see `watchdog_timeout` on http_request in
-// esphome/common.yaml, which wraps esp_http_client in a WatchdogManager).
+// NOTE: feeding is no help at all for a call that blocks *without* returning
+// to us — esp_http_client's synchronous post(), for instance, never lets the
+// loop task reach a feed. Such calls are covered only by the watchdog timeout
+// itself being long enough, which is what the global `esp32: watchdog_timeout:
+// 60s` in esphome/common.yaml is for (see the http_request block there for why
+// there is deliberately no per-request override).
 void feed_watchdog();
 
 // Poll `pin` until it reads `ready_level`, feeding the watchdog while waiting.

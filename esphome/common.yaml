@@ -113,17 +113,29 @@ ota:
 logger:
   level: INFO
 
-# Raise the global task watchdog from ESPHome's 5 s default. Two reasons:
-# 1. Field-observed clobber: http_request's WatchdogManager raise/restore is
-#    GLOBAL and not refcounted. The factory update check runs in its own
-#    FreeRTOS task; when it exits it restores the watchdog to this configured
-#    value — even if fetch_and_display's blocking post() is still standing on
-#    its raised 45 s window. With the 5 s default that restored value WAS the
-#    trap (boot loop whenever the update check overlapped a slow fetch). The
-#    factory yamls also serialize the check behind the fetch, but this is the
-#    defense in depth.
-# 2. A frame that genuinely wedges reboots after 60 s instead of 5 — an
-#    acceptable trade for a device whose panel refresh alone takes ~25 s.
+# Raise the global task watchdog from ESPHome's 5 s default to 60 s, the schema
+# maximum (esp32/__init__.py feeds this straight into
+# CONFIG_ESP_TASK_WDT_TIMEOUT_S, with CONFIG_ESP_TASK_WDT_PANIC=y).
+#
+# This setting is now the *sole* mechanism protecting the blocking HTTP fetch:
+# esp_http_client is synchronous, so fetch_and_display's post() owns the loop
+# task for the whole request and cannot feed the watchdog from inside it, and
+# the compile-time timeout set here is the only thing that decides whether that
+# call panics. There is deliberately no per-request `watchdog_timeout:` on
+# http_request any more — see the comment there before adding one back.
+#
+# The trade: a frame that genuinely wedges reboots after 60 s instead of 5,
+# which is fine for a device whose panel refresh alone takes ~25 s.
+#
+# History, so the superseded reasoning is not re-derived from scratch:
+# http_request's WatchdogManager raise/restore is GLOBAL and not refcounted,
+# and the factory update check runs in its own FreeRTOS task — when that task
+# exited it restored the watchdog to the compile-time value, clobbering the
+# window a blocking fetch was still standing on (a boot loop, back when that
+# compile-time value was the 5 s default). With no `watchdog_timeout:`
+# configured anywhere, every WatchdogManager is constructed with 0 and returns
+# immediately, so nothing raises, restores or clobbers anything. The factory
+# yamls still serialize the update check behind the fetch regardless.
 esp32:
   watchdog_timeout: 60s
 
@@ -134,25 +146,37 @@ http_request:
   # response can legitimately take 15-25 s. 30 s covers it; a LAN server that
   # has not answered in 30 s is not answering.
   timeout: 30s
-  # LOAD-BEARING. esp_http_client is *synchronous*: the post() in
-  # fetch_and_display below blocks ESPHome's main loop for the whole request —
-  # DNS (which can stall for many seconds on an unresolvable name such as the
-  # default homeassistant.local), TCP connect, TLS, transfer — while the ESP32
-  # task watchdog is armed at 5 s with panic enabled (esp32/__init__.py sets
-  # CONFIG_ESP_TASK_WDT_TIMEOUT_S from `esp32: watchdog_timeout:`, default 5s,
-  # and CONFIG_ESP_TASK_WDT_PANIC=y). No amount of feeding helps: the loop task
-  # is *inside* the blocking call and never gets to feed.
+  # LOAD-BEARING ABSENCE: do NOT add `watchdog_timeout:` here.
   #
-  # This option is the sanctioned fix: http_request wraps perform(), read() and
-  # end() in a watchdog::WatchdogManager, which raises the task watchdog to this
-  # value for the duration and restores it afterwards. Without it the manager is
-  # constructed with 0 and does nothing at all (watchdog.cpp: `if (timeout_ms ==
-  # 0) return;`), which is why an unreachable server used to reboot-loop the
-  # frame: fetch -> 5 s -> "Task watchdog got triggered ... loopTask" -> abort.
+  # The background is still true. esp_http_client is *synchronous*: the post()
+  # in fetch_and_display below blocks ESPHome's main loop for the whole request
+  # — DNS (which can stall for many seconds on an unresolvable name such as the
+  # default homeassistant.local), TCP connect, TLS, transfer — with the ESP32
+  # task watchdog armed and panic enabled. No amount of feeding helps: the loop
+  # task is *inside* the blocking call and never gets to feed. The only thing
+  # standing between an unreachable server and "Task watchdog got triggered ...
+  # loopTask -> abort" is the timeout the watchdog is armed with.
   #
-  # Comfortably above `timeout:` on purpose: the transport timeout only bounds
-  # socket operations, not name resolution, so perform() can outlast it.
-  watchdog_timeout: 45s
+  # What changed is where that timeout comes from. `esp32: watchdog_timeout:
+  # 60s` above pins CONFIG_ESP_TASK_WDT_TIMEOUT_S at the schema maximum for the
+  # entire firmware, which already covers perform(), every read() and end().
+  # Setting this option now could only LOWER that deadline, never raise it:
+  # http_request wraps those calls in a watchdog::WatchdogManager which does not
+  # raise, it SETS unconditionally (watchdog.cpp: save the compile-time value,
+  # esp_task_wdt_reconfigure() to whatever is configured here, restore on
+  # destruction). Constructed with 0 — i.e. option absent — it returns
+  # immediately and the 60 s global stays in force throughout, which is exactly
+  # what we want.
+  #
+  # This block used to say 45 s, from back when the global default was 5 s. Once
+  # the 60 s global landed, that 45 s silently cut 15 s off the panic deadline of
+  # the longest-blocking calls and bought a pair of *global*
+  # esp_task_wdt_reconfigure() calls per 4 KB read (~470 pairs per 13.3" image)
+  # for the privilege. Do not reintroduce it from that old reasoning.
+  #
+  # 60 s is therefore also the real ceiling for `timeout:` plus name resolution:
+  # the transport timeout only bounds socket operations, not DNS/mDNS, so
+  # perform() can outlast it. Keep the whole blocking call well under 60 s.
 
 deep_sleep:
   id: deep_sleep_control
@@ -318,6 +342,9 @@ script:
                 while (!base.empty() && base.back() == '/')
                   base.pop_back();
                 if (base.empty()) {
+                  // Deliberately NOT retried: an unconfigured URL is a config
+                  // error a human has to fix, and retrying it would only burn
+                  // battery and delay the sleep.
                   ESP_LOGE(FTAG, "Server URL is not configured");
                   return;
                 }
@@ -328,54 +355,99 @@ script:
                 if (!auth.empty())
                   headers.push_back({"Authorization", auth});
                 std::string body = id(epaper_display).get_image_request_body();
-                auto container = id(http_client)->post(url, body, headers);
-                if (container == nullptr) {
-                  ESP_LOGE(FTAG, "HTTP request failed");
-                  return;
-                }
-                if (container->status_code != 200) {
-                  ESP_LOGE(FTAG, "HTTP error %d", container->status_code);
-                  container->end();
-                  return;
-                }
                 size_t expected = id(epaper_display).get_image_byte_count();
-                if (container->content_length > 0 && container->content_length != expected) {
-                  ESP_LOGW(FTAG, "Server sent %u bytes but display expects %u",
-                           (unsigned) container->content_length, (unsigned) expected);
-                }
-                ESP_LOGI(FTAG, "Streaming %u bytes to display...", (unsigned) expected);
-                id(epaper_display).begin_image();
-                std::vector<uint8_t> buf(4096);
-                uint32_t last_data = millis();
-                bool complete = false;
-                while (true) {
-                  int n = container->read(buf.data(), buf.size());
-                  // Writing a chunk to the panel can block for a while (SPI
-                  // plus a controller busy-wait), so keep the watchdog fed.
-                  // eink_frame::feed_watchdog() rather than App.feed_wdt():
-                  // see eink_wait.h — a bare feed logs "task not found" from
-                  // any task ESPHome has not subscribed to the watchdog.
-                  eink_frame::feed_watchdog();
-                  yield();
-                  auto res = http_request::http_read_loop_result(
-                      n, last_data, 30000, container->is_read_complete());
-                  if (res == http_request::HttpReadLoopResult::DATA) {
-                    id(epaper_display).write_image_data(buf.data(), n);
-                    continue;
+
+                // Bounded retry. Without it, a single blip — the server still
+                // booting, a dropped DNS answer, a connection refused while
+                // systemd restarts the unit, a truncated stream — costs a whole
+                // "Sleep Duration" (default 60 min) of stale picture, and the
+                // frame's failure mode is silent: it just shows yesterday's
+                // photo. Three attempts is the trade: worst case the frame
+                // stays awake ~100 s (3 x the 30 s http `timeout:` plus 2 x 5 s
+                // between attempts, and a mid-stream stall can add up to the
+                // read loop's own 30 s no-data window) before sleeping, versus
+                // an hour of not noticing.
+                //
+                // Only *transient* failures are retried: no container (DNS,
+                // refused, unreachable), a non-200 status, or an incomplete
+                // stream. wake()/sleep() stay outside the loop — one panel
+                // wake per script run, not per attempt — and a failed attempt
+                // that already opened a transfer is closed out with
+                // finish_image(false) before the next begin_image(), which
+                // resets bytes_written_/transfer_failed_ and reopens the
+                // session (see eink_frame.cpp), so a retried transfer starts
+                // clean.
+                const int max_attempts = 3;
+                const uint32_t retry_delay_ms = 5000;
+                for (int attempt = 1; attempt <= max_attempts; attempt++) {
+                  if (attempt > 1)
+                    ESP_LOGW(FTAG, "Retrying fetch (attempt %d/%d)...", attempt, max_attempts);
+                  bool ok = false;
+                  auto container = id(http_client)->post(url, body, headers);
+                  if (container == nullptr) {
+                    ESP_LOGE(FTAG, "HTTP request failed");
+                  } else if (container->status_code != 200) {
+                    ESP_LOGE(FTAG, "HTTP error %d", container->status_code);
+                    container->end();
+                  } else {
+                    if (container->content_length > 0 && container->content_length != expected) {
+                      ESP_LOGW(FTAG, "Server sent %u bytes but display expects %u",
+                               (unsigned) container->content_length, (unsigned) expected);
+                    }
+                    ESP_LOGI(FTAG, "Streaming %u bytes to display...", (unsigned) expected);
+                    id(epaper_display).begin_image();
+                    std::vector<uint8_t> buf(4096);
+                    uint32_t last_data = millis();
+                    bool complete = false;
+                    while (true) {
+                      int n = container->read(buf.data(), buf.size());
+                      // Writing a chunk to the panel can block for a while (SPI
+                      // plus a controller busy-wait), so keep the watchdog fed.
+                      // eink_frame::feed_watchdog() rather than App.feed_wdt():
+                      // see eink_wait.h — a bare feed logs "task not found" from
+                      // any task ESPHome has not subscribed to the watchdog.
+                      eink_frame::feed_watchdog();
+                      yield();
+                      auto res = http_request::http_read_loop_result(
+                          n, last_data, 30000, container->is_read_complete());
+                      if (res == http_request::HttpReadLoopResult::DATA) {
+                        id(epaper_display).write_image_data(buf.data(), n);
+                        continue;
+                      }
+                      if (res == http_request::HttpReadLoopResult::RETRY)
+                        continue;
+                      complete = (res == http_request::HttpReadLoopResult::COMPLETE);
+                      break;
+                    }
+                    size_t received = container->get_bytes_read();
+                    container->end();
+                    ok = complete && received >= expected;
+                    if (!ok) {
+                      ESP_LOGE(FTAG, "Download incomplete: %u/%u bytes",
+                               (unsigned) received, (unsigned) expected);
+                    }
+                    // Always closes the transfer the begin_image() above opened,
+                    // success or not, so the next attempt (and the driver's
+                    // frame buffer) is not left half-open.
+                    id(epaper_display).finish_image(ok);
                   }
-                  if (res == http_request::HttpReadLoopResult::RETRY)
-                    continue;
-                  complete = (res == http_request::HttpReadLoopResult::COMPLETE);
-                  break;
+                  if (ok)
+                    break;
+                  if (attempt == max_attempts) {
+                    ESP_LOGE(FTAG, "Fetch failed %d times — leaving the current picture up", max_attempts);
+                    break;
+                  }
+                  // We are inside a lambda, i.e. on the blocked main loop: a
+                  // `- delay:` action is not available here. Spin on millis()
+                  // and keep the watchdog fed the same way (and for the same
+                  // reason) as the read loop above — never a bare
+                  // App.feed_wdt().
+                  uint32_t waited_from = millis();
+                  while (millis() - waited_from < retry_delay_ms) {
+                    eink_frame::feed_watchdog();
+                    yield();
+                  }
                 }
-                size_t received = container->get_bytes_read();
-                container->end();
-                bool ok = complete && received >= expected;
-                if (!ok) {
-                  ESP_LOGE(FTAG, "Download incomplete: %u/%u bytes",
-                           (unsigned) received, (unsigned) expected);
-                }
-                id(epaper_display).finish_image(ok);
             - lambda: id(epaper_display).sleep();
           else:
             - logger.log:
