@@ -414,6 +414,15 @@ script:
                   - logger.log:
                       format: "No WiFi credentials — staying awake for Improv provisioning"
                       level: INFO
+                  # Staying awake is only half the job: nothing else would ever
+                  # run again once the user actually provisions. Improv's
+                  # save_wifi_sta() connects without rebooting, and the only
+                  # other entries into fetch_and_display are on_boot and the
+                  # "Fetch Image Now" button — so without this hand-off the
+                  # frame sits connected, adoptable, blank and awake until a
+                  # human power-cycles it. await_provisioning restarts the
+                  # normal fetch -> maybe_sleep flow when WiFi comes up.
+                  - script.execute: await_provisioning
                 else:
                   - if:
                       condition:
@@ -422,12 +431,19 @@ script:
                         - logger.log:
                             format: "Never adopted by Home Assistant — staying awake"
                             level: INFO
-                        # Give Home Assistant a chance to discover and
-                        # adopt the device on this first provisioned boot.
+                        # Wait for Home Assistant to discover and adopt the
+                        # device on this first provisioned boot. Untimed on
+                        # purpose (same pattern as the factory on_boot update
+                        # gate): the frame is staying awake either way, so a
+                        # timeout would only mean "adoption at minute 6 leaves
+                        # the frame stranded awake forever", since
+                        # api.on_client_connected just sets globals and nothing
+                        # re-runs this script. With no timeout the wait simply
+                        # completes whenever adoption happens — and if it never
+                        # does, it dies with the chip at the next reset.
                         - wait_until:
                             condition:
                               lambda: return id(api_connected_this_boot);
-                            timeout: 300s
                         # Re-check the switch: adoption may have taken minutes,
                         # and Home Assistant may have turned it on meanwhile.
                         - if:
@@ -457,6 +473,65 @@ script:
                               float m = id(sleep_minutes).state;
                               if (!(m >= 1.0f)) m = ${default_sleep_minutes};
                               return (uint32_t) (m * 60000.0f);
+
+  # The second half of maybe_sleep's "no WiFi credentials" branch: pick the
+  # normal wake -> fetch -> sleep cycle back up the moment provisioning
+  # succeeds, instead of leaving a freshly provisioned frame awake and blank.
+  #
+  # Why this is its own script and not a wait_until appended to that branch:
+  # ESPHome actions run inline. `script.execute` plays the target script on the
+  # caller's stack, and every enclosing action keeps `num_running_ > 0` — hence
+  # keeps its script `is_running()` — until its branch reaches the end, across
+  # an asynchronous wait_until too. Fetching from inside maybe_sleep would
+  # therefore hit fetch_and_display's trailing `script.execute: maybe_sleep`
+  # while that very (single-mode) maybe_sleep was still on the stack, and the
+  # sleep check would be dropped with "Script 'maybe_sleep' is already
+  # running!". Parking the wait in a separate script avoids that: the wait_until
+  # below suspends immediately (its condition is false by construction — see
+  # there), maybe_sleep unwinds and finishes, and the fetch that resumes minutes
+  # later runs on a clean stack.
+  #
+  # Single mode is the loop guard: while parked, further executes are dropped,
+  # and after it has fired only another credential-less maybe_sleep can re-arm
+  # it. A WiFi drop later cannot re-trigger a fetch.
+  - id: await_provisioning
+    then:
+      # Untimed: the frame has nothing else to do until a human provisions it,
+      # and any timeout here would just recreate the stranding this fixes.
+      #
+      # BOTH halves are load-bearing, and together they are what makes this
+      # condition false at entry — which is what lets maybe_sleep unwind before
+      # anything else happens (see above):
+      #   - connected, because improv_serial only calls save_wifi_sta() once the
+      #     AP has accepted the credentials. has_sta() alone is true throughout
+      #     every attempt (set_sta() runs first) including the failing ones, so
+      #     it would fire this script on a typo'd password.
+      #   - has_sta, because a failed attempt ends in clear_sta(), which only
+      #     empties the credential list — it does not disconnect, and the whole
+      #     reconnect state machine in WiFiComponent::loop() sits behind
+      #     `if (this->has_sta())`. So a connection that comes up *after*
+      #     improv's 30 s timeout leaves the frame connected with nothing in
+      #     NVS. Firing there would fetch once and then strand the frame again:
+      #     fetch_and_display's tail maybe_sleep would take the no-credentials
+      #     branch and its `script.execute: await_provisioning` would be dropped
+      #     — this script is still on the stack, exactly the trap described
+      #     above. Waiting for both keeps us parked for the user's retry.
+      - wait_until:
+          condition:
+            lambda: |-
+              return wifi::global_wifi_component->is_connected() &&
+                     wifi::global_wifi_component->has_sta();
+      # Let improv_serial's loop see the connection first. It is what saves the
+      # credentials to NVS, cancels its 30 s "wifi-connect-timeout" (whose
+      # handler calls clear_sta()) and answers the web installer, and it only
+      # does any of that from its own loop(). fetch_and_display below blocks the
+      # main loop for the whole request plus panel refresh, and component loop
+      # order is not stable at runtime (Application::enable_loop_() reshuffles
+      # looping_components_, and this wait_until enables/disables its loop
+      # constantly), so without a gap the fetch can preempt that save and let
+      # the timeout wipe the new credentials instead.
+      - delay: 5s
+      - script.execute: fetch_and_display
 
   # Wake-button hold -> flashing mode. Started by the button's on_press and
   # killed by its on_release, so only an uninterrupted 8 s hold gets to the end.
