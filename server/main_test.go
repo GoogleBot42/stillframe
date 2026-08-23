@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/color/palette"
@@ -447,11 +448,13 @@ func TestFetchImageWithoutSmartcropStillServesAnImage(t *testing.T) {
 
 // An undecodable file in the image directory fails the one request with a 5xx.
 // It used to return a nil image.Image that flipImage dereferenced, so the
-// request panicked and only chi's Recoverer kept the server up.
+// request panicked and only chi's Recoverer kept the server up. The fixture
+// carries an image extension so that it is drawn the way a real photo would be,
+// rather than only as the last resort a .txt would be.
 func TestFetchImageNonImageFile(t *testing.T) {
 	silenceStdout(t)
 	imgDir := t.TempDir()
-	if err := writeFile(filepath.Join(imgDir, "readme.txt"), "not an image"); err != nil {
+	if err := writeFile(filepath.Join(imgDir, "readme.png"), "not an image"); err != nil {
 		t.Fatal(err)
 	}
 	withImageDir(t, imgDir)
@@ -471,6 +474,122 @@ func TestFetchImageEmptyImageDirectory(t *testing.T) {
 	rec := postJSON(t, "/fetchImage", ImageProperties{Width: 16, Height: 8, ColorSpace: epd7in3fPalette})
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status %d, want 500", rec.Code)
+	}
+}
+
+// One unusable file among usable ones used to cost the frame a whole sleep
+// cycle: the draw is uniform, so with k bad files out of N every wake had a k/N
+// chance of a 500 and hours of stale picture. The request must walk on instead.
+//
+// The single good file is deliberately outnumbered: a bounded number of retries
+// would fail here, and pushing the last-served file to the back of the queue
+// must not push the only working file out of reach on the second request.
+func TestFetchImageRetriesPastUndecodableFiles(t *testing.T) {
+	silenceStdout(t)
+	imgDir := t.TempDir()
+	// Decodable extensions, undecodable content: exactly what a truncated or
+	// misnamed file looks like, and the only case the extension filter cannot
+	// catch on its own.
+	for i := 0; i < 8; i++ {
+		name := fmt.Sprintf("broken%d.png", i)
+		if err := writeFile(filepath.Join(imgDir, name), "not an image"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	good := writeTempPNG(t, imgDir, "good.png", gradientRGBA(64, 48))
+	withImageDir(t, imgDir)
+	stubSmartcrop(t, 0, 0, 64, 48)
+
+	const w, h = 16, 8
+	for i := 0; i < 10; i++ {
+		rec := postJSON(t, "/fetchImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("iteration %d: status %d, body %q (the one good file is %q)", i, rec.Code, rec.Body.String(), good)
+		}
+		if want := w * h / 2; rec.Body.Len() != want {
+			t.Fatalf("iteration %d: got %d bytes, want %d", i, rec.Body.Len(), want)
+		}
+	}
+}
+
+// The walk must terminate: when nothing in the directory decodes, the request
+// is still a 500 (and the server stays up).
+func TestFetchImageAllCandidatesUndecodable(t *testing.T) {
+	silenceStdout(t)
+	imgDir := t.TempDir()
+	for _, name := range []string{"a.png", "b.jpg", "c.jpeg", "d.gif"} {
+		if err := writeFile(filepath.Join(imgDir, name), "not an image"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withImageDir(t, imgDir)
+	stubSmartcrop(t, 0, 0, 8, 8)
+
+	rec := postJSON(t, "/fetchImage", ImageProperties{Width: 16, Height: 8, ColorSpace: epd7in3fPalette})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d, want 500 (body %q)", rec.Code, rec.Body.String())
+	}
+	// The handler's own error, not a panic caught by chi's Recoverer.
+	if !strings.Contains(rec.Body.String(), "no image available") {
+		t.Errorf("body %q, want the handler's own 'no image available'", rec.Body.String())
+	}
+}
+
+// A .DS_Store or a .heic next to the photos is not a reason to show nothing:
+// dotfiles never enter the draw, and an undecodable extension is only ever
+// tried after the real pictures.
+func TestFetchImageIgnoresUndecodableExtensions(t *testing.T) {
+	silenceStdout(t)
+	imgDir := t.TempDir()
+	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
+	for _, name := range []string{".DS_Store", "clip.mp4", "phone.heic", "readme.txt", ".only.png.tmp7"} {
+		if err := writeFile(filepath.Join(imgDir, name), "not an image"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withImageDir(t, imgDir)
+	stubSmartcrop(t, 0, 0, 64, 48)
+
+	const w, h = 16, 8
+	for i := 0; i < 20; i++ {
+		rec := postJSON(t, "/fetchImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("iteration %d: status %d, body %q", i, rec.Code, rec.Body.String())
+		}
+		if want := w * h / 2; rec.Body.Len() != want {
+			t.Fatalf("iteration %d: got %d bytes, want %d", i, rec.Body.Len(), want)
+		}
+	}
+}
+
+// A uniform draw repeats back-to-back 1/N of the time, which on a frame that
+// refreshes a handful of times a day is very visible. Consecutive requests must
+// not serve the same file.
+func TestFetchImageDoesNotRepeatTheSameImageBackToBack(t *testing.T) {
+	silenceStdout(t)
+	imgDir := t.TempDir()
+	writeTempPNG(t, imgDir, "white.png", solidRGBA(64, 48, color.RGBA{255, 255, 255, 255}))
+	writeTempPNG(t, imgDir, "black.png", solidRGBA(64, 48, color.RGBA{0, 0, 0, 255}))
+	withImageDir(t, imgDir)
+	stubSmartcrop(t, 0, 0, 64, 48)
+
+	props := ImageProperties{Width: 16, Height: 8, ColorSpace: bwPalette}
+	seen := map[string]bool{}
+	var prev string
+	for i := 0; i < 12; i++ {
+		rec := postJSON(t, "/fetchImage", props)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("iteration %d: status %d, body %q", i, rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		if i > 0 && body == prev {
+			t.Fatalf("iteration %d served the same image twice in a row", i)
+		}
+		seen[body] = true
+		prev = body
+	}
+	if len(seen) != 2 {
+		t.Errorf("expected both images to be served, saw %d distinct results", len(seen))
 	}
 }
 
@@ -501,10 +620,37 @@ func TestFetchImageIgnoresSubdirectories(t *testing.T) {
 }
 
 // ===========================================================================
-// getRandomFile
+// imageCandidates
 // ===========================================================================
 
-func TestGetRandomFileReturnsAFileFromTheDirectory(t *testing.T) {
+// drawOne returns the file the next fetch would try first.
+func drawOne(t *testing.T, dir string) string {
+	t.Helper()
+	candidates, err := imageCandidates(dir)
+	if err != nil {
+		t.Fatalf("imageCandidates(%q): %v", dir, err)
+	}
+	return candidates[0]
+}
+
+// mustCandidates returns the candidate list as a set.
+func mustCandidates(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	candidates, err := imageCandidates(dir)
+	if err != nil {
+		t.Fatalf("imageCandidates(%q): %v", dir, err)
+	}
+	set := map[string]bool{}
+	for _, c := range candidates {
+		set[c] = true
+	}
+	if len(set) != len(candidates) {
+		t.Fatalf("candidate list has duplicates: %v", candidates)
+	}
+	return set
+}
+
+func TestImageCandidatesDrawsFromTheDirectory(t *testing.T) {
 	dir := t.TempDir()
 	want := map[string]bool{}
 	for _, n := range []string{"a.png", "b.png", "c.png", "d.png"} {
@@ -514,13 +660,11 @@ func TestGetRandomFileReturnsAFileFromTheDirectory(t *testing.T) {
 		}
 		want[p] = true
 	}
+	withLastServed(t, "")
 
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		got, err := getRandomFile(dir)
-		if err != nil {
-			t.Fatalf("iteration %d: %v", i, err)
-		}
+		got := drawOne(t, dir)
 		if !want[got] {
 			t.Fatalf("returned %q which is not one of the files in the directory", got)
 		}
@@ -531,15 +675,41 @@ func TestGetRandomFileReturnsAFileFromTheDirectory(t *testing.T) {
 	}
 }
 
-func TestGetRandomFileMissingDirectory(t *testing.T) {
-	if _, err := getRandomFile(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+// The whole directory is offered, not just the first pick: that is what lets
+// the decode walk reach a working file past any number of broken ones.
+func TestImageCandidatesOffersEveryFile(t *testing.T) {
+	dir := t.TempDir()
+	want := map[string]bool{}
+	for _, n := range []string{"a.png", "b.png", "c.png", "d.png", "e.png"} {
+		p := filepath.Join(dir, n)
+		if err := writeFile(p, "x"); err != nil {
+			t.Fatal(err)
+		}
+		want[p] = true
+	}
+	withLastServed(t, "")
+
+	got := mustCandidates(t, dir)
+	if len(got) != len(want) {
+		t.Fatalf("got %d candidates, want %d: %v", len(got), len(want), got)
+	}
+	for p := range want {
+		if !got[p] {
+			t.Errorf("%q is missing from the candidate list", p)
+		}
+	}
+}
+
+func TestImageCandidatesMissingDirectory(t *testing.T) {
+	if _, err := imageCandidates(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
 		t.Error("expected an error for a missing directory")
 	}
 }
 
-// rand.Intn(0) panics, so an empty directory has to be detected up front.
-func TestGetRandomFileEmptyDirectory(t *testing.T) {
-	got, err := getRandomFile(t.TempDir())
+// An empty candidate list would index out of range downstream, so it has to be
+// reported as an error up front.
+func TestImageCandidatesEmptyDirectory(t *testing.T) {
+	got, err := imageCandidates(t.TempDir())
 	if err == nil {
 		t.Fatalf("expected an error for an empty directory, got %q", got)
 	}
@@ -549,20 +719,34 @@ func TestGetRandomFileEmptyDirectory(t *testing.T) {
 }
 
 // A directory containing only sub-directories has no image to serve.
-func TestGetRandomFileOnlySubdirectories(t *testing.T) {
+func TestImageCandidatesOnlySubdirectories(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := getRandomFile(dir); err == nil {
+	if got, err := imageCandidates(dir); err == nil {
 		t.Errorf("expected an error when the directory holds no files, got %q", got)
+	}
+}
+
+// A directory of nothing but dotfiles is empty as far as the draw is concerned;
+// the fallback must not resurrect them.
+func TestImageCandidatesOnlyDotfiles(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{".DS_Store", ".hidden.png"} {
+		if err := writeFile(filepath.Join(dir, name), "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := imageCandidates(dir); err == nil {
+		t.Errorf("expected an error when the directory holds only dotfiles, got %q", got)
 	}
 }
 
 // The draw is over the files only. Drawing over every dirent but stepping only
 // past files made the loop fall through and return os.ErrNotExist whenever the
 // image directory held sub-directories.
-func TestGetRandomFileWithSubdirectories(t *testing.T) {
+func TestImageCandidatesWithSubdirectories(t *testing.T) {
 	dir := t.TempDir()
 	only := filepath.Join(dir, "only.png")
 	if err := writeFile(only, "x"); err != nil {
@@ -573,12 +757,187 @@ func TestGetRandomFileWithSubdirectories(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	withLastServed(t, "")
+
 	for i := 0; i < 100; i++ {
-		got, err := getRandomFile(dir)
-		if err != nil {
-			t.Fatalf("iteration %d: %v (the only regular file is %q)", i, err, only)
+		if got := drawOne(t, dir); got != only {
+			t.Fatalf("iteration %d: got %q, want %q", i, got, only)
 		}
-		if got != only {
+	}
+}
+
+// A .heic or a .mp4 next to the photos is an all-but-certain decode failure, so
+// it is never tried while a real picture is still on the queue.
+func TestImageCandidatesTryDecodableExtensionsFirst(t *testing.T) {
+	dir := t.TempDir()
+	only := filepath.Join(dir, "only.png")
+	if err := writeFile(only, "x"); err != nil {
+		t.Fatal(err)
+	}
+	junk := []string{"notes.txt", "clip.mp4", "phone.heic", "archive.zip", "noext"}
+	for _, name := range junk {
+		if err := writeFile(filepath.Join(dir, name), "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withLastServed(t, "")
+
+	for i := 0; i < 100; i++ {
+		if got := drawOne(t, dir); got != only {
+			t.Fatalf("iteration %d drew %q before the one file with a decodable extension %q", i, got, only)
+		}
+	}
+	// They stay on the queue behind it: a directory is not allowed to become
+	// unservable because its only decodable-looking file is corrupt.
+	if got := mustCandidates(t, dir); len(got) != len(junk)+1 {
+		t.Errorf("got %d candidates, want %d: %v", len(got), len(junk)+1, got)
+	}
+}
+
+// Dotfiles are either editor/OS metadata (.DS_Store) or rsync's partial
+// transfers (.photo.jpg.XXXXXX), which decode only some of the time.
+func TestImageCandidatesSkipsDotfiles(t *testing.T) {
+	dir := t.TempDir()
+	only := filepath.Join(dir, "only.jpg")
+	if err := writeFile(only, "x"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".DS_Store", ".hidden.png", ".only.jpg.tmp7Kq2", ".gif"} {
+		if err := writeFile(filepath.Join(dir, name), "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withLastServed(t, "")
+
+	got := mustCandidates(t, dir)
+	if len(got) != 1 || !got[only] {
+		t.Errorf("candidates %v, want only %q", got, only)
+	}
+}
+
+// Every extension the registered decoders handle must stay drawable, in any
+// case: a directory of .JPG files off a camera is not an empty directory.
+func TestImageCandidatesAcceptEveryDecodableExtension(t *testing.T) {
+	dir := t.TempDir()
+	want := map[string]bool{}
+	for _, name := range []string{"a.png", "b.jpg", "c.jpeg", "d.gif", "e.PNG", "f.JPG", "g.JPEG", "h.GIF", "i.jfif"} {
+		p := filepath.Join(dir, name)
+		if err := writeFile(p, "x"); err != nil {
+			t.Fatal(err)
+		}
+		want[p] = true
+	}
+	withLastServed(t, "")
+
+	got := mustCandidates(t, dir)
+	for p := range want {
+		if !got[p] {
+			t.Errorf("%q was filtered out even though its extension is decodable", p)
+		}
+	}
+}
+
+// The extension filter must not turn a directory of extension-less exports into
+// "no image available": image.Decode goes by content, so every non-dotfile is
+// worth sniffing once the likelier candidates are exhausted.
+func TestImageCandidatesOfferFilesWithoutADecodableExtension(t *testing.T) {
+	dir := t.TempDir()
+	want := map[string]bool{}
+	for _, name := range []string{"export", "readme.txt", "movie.mp4"} {
+		p := filepath.Join(dir, name)
+		if err := writeFile(p, "x"); err != nil {
+			t.Fatal(err)
+		}
+		want[p] = true
+	}
+	if err := writeFile(filepath.Join(dir, ".DS_Store"), "x"); err != nil {
+		t.Fatal(err)
+	}
+	withLastServed(t, "")
+
+	got := mustCandidates(t, dir)
+	if len(got) != len(want) {
+		t.Fatalf("got %d candidates, want %d: %v", len(got), len(want), got)
+	}
+	for p := range want {
+		if !got[p] {
+			t.Errorf("%q is missing from the candidate list", p)
+		}
+	}
+}
+
+// One corrupt file with an image extension must not hide a directory full of
+// extension-less pictures behind it: preferring an extension is a hint about
+// what to try first, never a reason to leave a real picture unreachable.
+func TestFetchImageFallsPastACorruptPreferredFile(t *testing.T) {
+	silenceStdout(t)
+	imgDir := t.TempDir()
+	if err := writeFile(filepath.Join(imgDir, "cover.jpg"), ""); err != nil {
+		t.Fatal(err)
+	}
+	// Real PNGs, written without an extension (a phone/export dump).
+	for i := 0; i < 4; i++ {
+		writeTempPNG(t, imgDir, fmt.Sprintf("export%d", i), gradientRGBA(64, 48))
+	}
+	withImageDir(t, imgDir)
+	stubSmartcrop(t, 0, 0, 64, 48)
+
+	const w, h = 16, 8
+	for i := 0; i < 10; i++ {
+		rec := postJSON(t, "/fetchImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("iteration %d: status %d, body %q", i, rec.Code, rec.Body.String())
+		}
+		if want := w * h / 2; rec.Body.Len() != want {
+			t.Fatalf("iteration %d: got %d bytes, want %d", i, rec.Body.Len(), want)
+		}
+	}
+}
+
+// The last-served file goes to the back of the queue, so the next request shows
+// a different photo — but it stays in the queue, so it is still there to fall
+// back on when everything else is broken.
+func TestImageCandidatesPutTheLastServedFileLast(t *testing.T) {
+	dir := t.TempDir()
+	var paths []string
+	for _, n := range []string{"a.png", "b.png", "c.png"} {
+		p := filepath.Join(dir, n)
+		if err := writeFile(p, "x"); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	withLastServed(t, paths[0])
+
+	for i := 0; i < 100; i++ {
+		candidates, err := imageCandidates(dir)
+		if err != nil {
+			t.Fatalf("iteration %d: %v", i, err)
+		}
+		if len(candidates) != len(paths) {
+			t.Fatalf("iteration %d: got %d candidates, want %d", i, len(candidates), len(paths))
+		}
+		if candidates[0] == paths[0] {
+			t.Fatalf("iteration %d drew the last-served file %q first", i, paths[0])
+		}
+		if last := candidates[len(candidates)-1]; last != paths[0] {
+			t.Fatalf("iteration %d: last candidate is %q, want the last-served %q", i, last, paths[0])
+		}
+	}
+}
+
+// Avoiding a repeat must never mean serving nothing: a one-image directory
+// keeps serving its one image.
+func TestImageCandidatesSingleFileStillServedAfterBeingServed(t *testing.T) {
+	dir := t.TempDir()
+	only := filepath.Join(dir, "only.png")
+	if err := writeFile(only, "x"); err != nil {
+		t.Fatal(err)
+	}
+	withLastServed(t, only)
+
+	for i := 0; i < 20; i++ {
+		if got := drawOne(t, dir); got != only {
 			t.Fatalf("iteration %d: got %q, want %q", i, got, only)
 		}
 	}
