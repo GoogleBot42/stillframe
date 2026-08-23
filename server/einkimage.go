@@ -97,12 +97,25 @@ func ConvertToEInkImage(src image.Image, colorSpace ColorSpace) []byte {
 	image := ConvertImageToColors(src)
 	matcher := newPaletteMatcher(colorSpace)
 
+	// Gamma-correct the whole grid before quantizing anything, so that
+	// quantization and error diffusion happen in the same space. Correcting
+	// per pixel at quantization time instead diffused the error into
+	// *un-corrected* neighbours, which were then re-warped by pow(v, 1.2) when
+	// their own turn came: error diffusion no longer conserved mean intensity,
+	// shadows crushed (a uniform sRGB 16/255 field rendered as pure black, zero
+	// dithered white pixels) and highlights compressed.
+	for y := range image {
+		for x := range image[y] {
+			image[y][x] = CorrectGamma(image[y][x])
+		}
+	}
+
 	var einkImage []byte
 
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			// find closest color
-			imageColor := CorrectGamma(image[y][x])
+			imageColor := image[y][x]
 			bestColorCode, bestColor := matcher.nearest(imageColor)
 
 			einkImage = append(einkImage, bestColorCode)

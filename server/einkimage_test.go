@@ -284,11 +284,14 @@ func TestConvertToEInkImageUniformBlackAndWhite(t *testing.T) {
 	}
 }
 
-// A mid-gray on a pure black/white palette can only be represented by mixing
-// codes; the dither must produce both values rather than a flat field.
-func TestConvertToEInkImageDithersMidTones(t *testing.T) {
-	out := ConvertToEInkImage(solidRGBA(16, 8, color.RGBA{190, 190, 190, 255}), bwPalette)
-	var black, white int
+// whiteFraction renders a uniform sRGB gray field through the black/white
+// palette and returns the fraction of pixels that came out white, along with
+// the raw counts.
+func whiteFraction(t *testing.T, v uint8) (fraction float64, black, white int) {
+	t.Helper()
+	// 64x64 is large enough that the fraction is a stable measurement rather
+	// than a handful of pixels rounding around.
+	out := ConvertToEInkImage(solidRGBA(64, 64, color.RGBA{v, v, v, 255}), bwPalette)
 	for _, b := range out {
 		for _, nib := range []byte{b >> 4, b & 0xF} {
 			if nib == 0 {
@@ -298,19 +301,51 @@ func TestConvertToEInkImageDithersMidTones(t *testing.T) {
 			}
 		}
 	}
-	if black == 0 || white == 0 {
-		t.Fatalf("expected a mix of black and white from dithering, got black=%d white=%d", black, white)
-	}
-	// Error diffusion must preserve average intensity: the fraction of white
-	// pixels should track the gamma-corrected input value.
-	// (190/255) ** 1.2, computed independently of CorrectGamma so the assertion
-	// is not self-referential.
-	const wantWhiteFraction = 0.70252
+	return float64(white) / float64(black+white), black, white
+}
 
-	gotWhiteFraction := float64(white) / float64(black+white)
-	if !almostEqual(gotWhiteFraction, wantWhiteFraction, 0.06) {
-		t.Errorf("dither should average out to the source intensity: got %.3f white, want ~%.3f (black=%d white=%d)",
-			gotWhiteFraction, wantWhiteFraction, black, white)
+// A gray that is not in the palette can only be represented by mixing codes:
+// the dither must produce both values rather than a flat field, and the mix
+// must average out to the source intensity. That mean-intensity invariant is
+// the whole point of error diffusion, and it only holds if quantization and
+// diffusion happen in the same space — gamma-correcting at quantization time
+// while diffusing the error into un-corrected neighbours crushed shadows to
+// pure black (uniform sRGB 8 and 16 produced zero white pixels) and compressed
+// highlights (sRGB 248 rendered at 0.928 white instead of 0.967).
+func TestConvertToEInkImageDithersMidTones(t *testing.T) {
+	// Targets are (v/255) ** 1.2, computed independently of CorrectGamma so the
+	// assertions are not self-referential. Shadows and highlights are sampled
+	// as well as mid-tones: the tone curve's ends are where a diffusion-space
+	// mismatch shows up first.
+	cases := []struct {
+		v    uint8
+		want float64
+	}{
+		{8, 0.01570},
+		{16, 0.03607},
+		{32, 0.08286},
+		{64, 0.19036},
+		{128, 0.43732},
+		{190, 0.70252},
+		{224, 0.85595},
+		{240, 0.92983},
+		{248, 0.96715},
+	}
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("gray%d", tc.v), func(t *testing.T) {
+			got, black, white := whiteFraction(t, tc.v)
+			if black == 0 || white == 0 {
+				t.Fatalf("expected a mix of black and white from dithering, got black=%d white=%d", black, white)
+			}
+			// The fix's worst error over these samples is 0.005, so 0.01 is
+			// 2x headroom while still failing every pre-fix case (the closest,
+			// gray32, was off by 0.021).
+			if !almostEqual(got, tc.want, 0.01) {
+				t.Errorf("dither should average out to the source intensity: got %.4f white, want ~%.4f (black=%d white=%d)",
+					got, tc.want, black, white)
+			}
+		})
 	}
 }
 
