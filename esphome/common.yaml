@@ -487,9 +487,9 @@ script:
   # while that very (single-mode) maybe_sleep was still on the stack, and the
   # sleep check would be dropped with "Script 'maybe_sleep' is already
   # running!". Parking the wait in a separate script avoids that: the wait_until
-  # below suspends immediately (its condition is false by construction — we only
-  # get here with no credentials at all), maybe_sleep unwinds and finishes, and
-  # the fetch that resumes minutes later runs on a clean stack.
+  # below suspends immediately (its condition is false by construction — see
+  # there), maybe_sleep unwinds and finishes, and the fetch that resumes minutes
+  # later runs on a clean stack.
   #
   # Single mode is the loop guard: while parked, further executes are dropped,
   # and after it has fired only another credential-less maybe_sleep can re-arm
@@ -499,19 +499,37 @@ script:
       # Untimed: the frame has nothing else to do until a human provisions it,
       # and any timeout here would just recreate the stranding this fixes.
       #
-      # Waiting on the *connection* rather than on has_sta() is deliberate.
-      # improv_serial only calls save_wifi_sta() once the AP has accepted the
-      # credentials; a failed attempt ends in clear_sta(), so has_sta() flickers
-      # true during every attempt while wifi.connected is true only when
-      # provisioning has genuinely worked — and stays waiting for the retry.
+      # BOTH halves are load-bearing, and together they are what makes this
+      # condition false at entry — which is what lets maybe_sleep unwind before
+      # anything else happens (see above):
+      #   - connected, because improv_serial only calls save_wifi_sta() once the
+      #     AP has accepted the credentials. has_sta() alone is true throughout
+      #     every attempt (set_sta() runs first) including the failing ones, so
+      #     it would fire this script on a typo'd password.
+      #   - has_sta, because a failed attempt ends in clear_sta(), which only
+      #     empties the credential list — it does not disconnect, and the whole
+      #     reconnect state machine in WiFiComponent::loop() sits behind
+      #     `if (this->has_sta())`. So a connection that comes up *after*
+      #     improv's 30 s timeout leaves the frame connected with nothing in
+      #     NVS. Firing there would fetch once and then strand the frame again:
+      #     fetch_and_display's tail maybe_sleep would take the no-credentials
+      #     branch and its `script.execute: await_provisioning` would be dropped
+      #     — this script is still on the stack, exactly the trap described
+      #     above. Waiting for both keeps us parked for the user's retry.
       - wait_until:
-          condition: wifi.connected
+          condition:
+            lambda: |-
+              return wifi::global_wifi_component->is_connected() &&
+                     wifi::global_wifi_component->has_sta();
       # Let improv_serial's loop see the connection first. It is what saves the
       # credentials to NVS, cancels its 30 s "wifi-connect-timeout" (whose
-      # handler calls clear_sta()) and answers the web installer — and
-      # fetch_and_display below blocks the main loop for the whole request plus
-      # panel refresh, so starting it in the same instant could postpone all of
-      # that past the point where the timeout wipes the new credentials.
+      # handler calls clear_sta()) and answers the web installer, and it only
+      # does any of that from its own loop(). fetch_and_display below blocks the
+      # main loop for the whole request plus panel refresh, and component loop
+      # order is not stable at runtime (Application::enable_loop_() reshuffles
+      # looping_components_, and this wait_until enables/disables its loop
+      # constantly), so without a gap the fetch can preempt that save and let
+      # the timeout wipe the new credentials instead.
       - delay: 5s
       - script.execute: fetch_and_display
 
