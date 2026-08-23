@@ -102,7 +102,15 @@ void EinkFrameDisplay::finish_image(bool ok) {
   }
 
   EINK_LOGI(this->frame_tag_(), "Image data sent, refreshing display...");
-  this->on_finish_image_(true);
+  if (!this->on_finish_image_(true)) {
+    // The image arrived intact but the panel never finished the update: a
+    // busy/ready line that stayed stuck, or a command sequence the driver had
+    // to abandon. Saying "complete" here is what let an unplugged panel look
+    // like a working one in the log.
+    this->transfer_failed_ = true;
+    EINK_LOGE(this->frame_tag_(), "Display refresh failed — the panel did not complete the update");
+    return;
+  }
   EINK_LOGI(this->frame_tag_(), "Display refresh complete");
 }
 

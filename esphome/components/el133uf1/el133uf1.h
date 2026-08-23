@@ -64,7 +64,7 @@ class EL133UF1 : public Component,
   // buffered (in PSRAM) and split/rotated during finish_image().
   void on_begin_image_() override;
   void on_image_data_(size_t offset, const uint8_t *data, size_t len) override;
-  void on_finish_image_(bool complete) override;
+  bool on_finish_image_(bool complete) override;
 
   void power_on_and_init_();
   void power_off_();
