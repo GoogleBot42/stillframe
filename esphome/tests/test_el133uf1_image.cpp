@@ -4,6 +4,8 @@
 #include "esphome/components/el133uf1/el133uf1_image.h"
 #include "test.h"
 
+#include <cstring>
+
 using namespace esphome::el133uf1;
 
 namespace {
@@ -50,15 +52,9 @@ struct NativePos {
 uint8_t native_pixel(const uint8_t *buffer, int rotation, int px, int py) {
   int px_start = px < NATIVE_WIDTH / 2 ? 0 : NATIVE_WIDTH / 2;
   uint8_t row_buf[HALF_ROW_BYTES];
-  const uint8_t *row;
-  if (rotation == 0) {
-    row = native_half_row(buffer, py, px_start);
-  } else {
-    build_rotated_half_row(buffer, rotation, py, px_start, row_buf);
-    row = row_buf;
-  }
+  build_half_row(buffer, rotation, py, px_start, row_buf);
   int i = (px - px_start) / 2;
-  return (px & 1) ? (row[i] & 0x0F) : (row[i] >> 4);
+  return (px & 1) ? (row_buf[i] & 0x0F) : (row_buf[i] >> 4);
 }
 
 // An otherwise blank frame with a single marker nibble at buffer pixel (0, 0).
@@ -77,19 +73,13 @@ NativePos find_marker(const uint8_t *buffer, int rotation, uint8_t marker) {
   uint8_t row_buf[HALF_ROW_BYTES];
   for (int py = 0; py < NATIVE_HEIGHT; py++) {
     for (int px_start : {0, NATIVE_WIDTH / 2}) {
-      const uint8_t *row;
-      if (rotation == 0) {
-        row = native_half_row(buffer, py, px_start);
-      } else {
-        build_rotated_half_row(buffer, rotation, py, px_start, row_buf);
-        row = row_buf;
-      }
+      build_half_row(buffer, rotation, py, px_start, row_buf);
       for (int i = 0; i < HALF_ROW_BYTES; i++) {
-        if ((row[i] >> 4) == marker) {
+        if ((row_buf[i] >> 4) == marker) {
           found = {px_start + i * 2, py};
           count++;
         }
-        if ((row[i] & 0x0F) == marker) {
+        if ((row_buf[i] & 0x0F) == marker) {
           found = {px_start + i * 2 + 1, py};
           count++;
         }
@@ -137,6 +127,33 @@ TEST(native_half_row_slices_the_buffer) {
       CHECK_EQ_INT(expected_native_pixel(0, NATIVE_WIDTH / 2 + i * 2 + 1, py), slave[i] & 0x0F);
     }
   }
+}
+
+// Whatever the rotation, the bytes the driver hands to write_array() are the
+// caller's own row_buf, never a pointer into the frame buffer: that buffer is
+// PSRAM and the SPI transfer is DMA-backed (issue #26). rotation 0 is the case
+// that could have aliased, so check it really copies.
+TEST(build_half_row_copies_rotation_0_out_of_the_frame_buffer) {
+  std::vector<uint8_t> image = make_image(NATIVE_WIDTH, NATIVE_HEIGHT);
+
+  uint8_t row_buf[HALF_ROW_BYTES];
+  for (int py : {0, 1, 799, NATIVE_HEIGHT - 1}) {
+    for (int px_start : {0, NATIVE_WIDTH / 2}) {
+      std::memset(row_buf, 0x5A, sizeof(row_buf));
+      build_half_row(image.data(), 0, py, px_start, row_buf);
+
+      const uint8_t *slice = native_half_row(image.data(), py, px_start);
+      for (int i = 0; i < HALF_ROW_BYTES; i++)
+        CHECK_EQ_INT(slice[i], row_buf[i]);
+    }
+  }
+
+  // A copy, not a view: scribbling over the source leaves row_buf alone.
+  build_half_row(image.data(), 0, 0, 0, row_buf);
+  uint8_t first = row_buf[0];
+  image[0] = (uint8_t) ~image[0];
+  CHECK_EQ_INT(first, row_buf[0]);
+  CHECK(native_half_row(image.data(), 0, 0)[0] != row_buf[0]);
 }
 
 // rotation 90/270: every native pixel is gathered from the landscape buffer.
