@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"image"
+	"image/color"
 	"math"
 
 	"github.com/mattn/go-ciede2000"
@@ -32,23 +33,61 @@ func ditherFloydSteinberg(image [][]Colorf, x int, y int, color Colorf) {
 	ditherPixel(x+1, y+1, multColor(color, 1.0/16.0))
 }
 
-// nearestPaletteColor returns the color space entry that is perceptually
-// closest (CIEDE2000) to target. An empty color space yields black/code 0.
-func nearestPaletteColor(colorSpace ColorSpace, target Colorf) (uint8, Colorf) {
-	minDist := math.MaxFloat64
-	bestColorCode := uint8(0x0)
-	bestColor := Colorf{0, 0, 0}
+// paletteMatcher answers nearest-color queries against one fixed palette. The
+// palette's Lab values are converted once, and each distinct target is matched
+// at most once. Matching is keyed on the 8-bit RGBA that convertToRGBA
+// truncates the target to, so the cache is exact, and small: a request can hit
+// at most 16.7M keys but a dithered photo lands on a few hundred thousand.
+// Calling ciede2000.Diff per pixel x palette entry instead — which re-derives
+// Lab for both arguments every call — put a grey16 /fetchImage at ~24 s of
+// CPU, blowing the firmware's 30 s HTTP timeout.
+type paletteMatcher struct {
+	colorSpace ColorSpace
+	labs       []*ciede2000.LAB
+	cache      map[color.RGBA]int
+}
 
-	for _, def := range colorSpace {
-		dist := ciede2000.Diff(convertToRGBA(target), convertToRGBA(def.Color))
-		if dist < minDist {
-			minDist = dist
-			bestColorCode = def.Code
-			bestColor = def.Color
-		}
+func newPaletteMatcher(colorSpace ColorSpace) *paletteMatcher {
+	m := &paletteMatcher{
+		colorSpace: colorSpace,
+		labs:       make([]*ciede2000.LAB, len(colorSpace)),
+		cache:      map[color.RGBA]int{},
+	}
+	for i, def := range colorSpace {
+		m.labs[i] = ciede2000.ToLAB(convertToRGBA(def.Color))
+	}
+	return m
+}
+
+// nearest returns the color space entry that is perceptually closest
+// (CIEDE2000) to target. An empty color space yields black/code 0.
+func (m *paletteMatcher) nearest(target Colorf) (uint8, Colorf) {
+	if len(m.colorSpace) == 0 {
+		return 0, Colorf{0, 0, 0}
 	}
 
-	return bestColorCode, bestColor
+	rgba := convertToRGBA(target)
+	best, ok := m.cache[rgba]
+	if !ok {
+		targetLab := ciede2000.ToLAB(rgba)
+		minDist := math.MaxFloat64
+		for i, lab := range m.labs {
+			if dist := ciede2000.CIEDE2000(targetLab, lab); dist < minDist {
+				minDist = dist
+				best = i
+			}
+		}
+		m.cache[rgba] = best
+	}
+
+	def := m.colorSpace[best]
+	return def.Code, def.Color
+}
+
+// nearestPaletteColor is the one-shot form for callers that match a single
+// color; per-pixel work goes through a shared paletteMatcher instead.
+func nearestPaletteColor(colorSpace ColorSpace, target Colorf) (uint8, Colorf) {
+	return newPaletteMatcher(colorSpace).nearest(target)
 }
 
 func ConvertToEInkImage(src image.Image, colorSpace ColorSpace) []byte {
@@ -56,6 +95,7 @@ func ConvertToEInkImage(src image.Image, colorSpace ColorSpace) []byte {
 	width, height := bounds.Dx(), bounds.Dy()
 
 	image := ConvertImageToColors(src)
+	matcher := newPaletteMatcher(colorSpace)
 
 	var einkImage []byte
 
@@ -63,7 +103,7 @@ func ConvertToEInkImage(src image.Image, colorSpace ColorSpace) []byte {
 		for x := 0; x < width; x++ {
 			// find closest color
 			imageColor := CorrectGamma(image[y][x])
-			bestColorCode, bestColor := nearestPaletteColor(colorSpace, imageColor)
+			bestColorCode, bestColor := matcher.nearest(imageColor)
 
 			einkImage = append(einkImage, bestColorCode)
 

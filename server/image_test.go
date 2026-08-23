@@ -358,13 +358,23 @@ func TestFlipImageDoesNotMutateSource(t *testing.T) {
 // a sub-image is not.
 func TestFlipImageNonZeroOrigin(t *testing.T) {
 	src := image.NewRGBA(image.Rect(3, 3, 7, 6)) // 4x3 at (3,3)
-	src.SetRGBA(3, 3, color.RGBA{1, 2, 3, 255})
-	got := flipImage(src, false, false)
-	if got.Bounds().Dx() != 4 || got.Bounds().Dy() != 3 {
-		t.Fatalf("got %v, want a 4x3 image", got.Bounds())
+	src.SetRGBA(6, 3, color.RGBA{1, 2, 3, 255})  // top-right corner
+	got := flipImage(src, false, true)
+	if got.Bounds() != image.Rect(0, 0, 4, 3) {
+		t.Fatalf("got %v, want a 4x3 image at the origin", got.Bounds())
 	}
 	if c := got.At(0, 0).(color.RGBA); c.R != 1 || c.G != 2 || c.B != 3 {
-		t.Errorf("top-left pixel %v, want the source's (3,3) pixel {1 2 3 255}", c)
+		t.Errorf("top-left pixel %v, want the source's top-right pixel {1 2 3 255}", c)
+	}
+}
+
+// With no flip requested the source is returned as-is — the pipeline's largest
+// image (the full-resolution decode) must not be copied pixel-by-pixel just to
+// stay identical. Everything downstream accepts an arbitrary image.Image.
+func TestFlipImageNoFlipReturnsSourceUnchanged(t *testing.T) {
+	src := markerImage(4, 3)
+	if got := flipImage(src, false, false); got != image.Image(src) {
+		t.Error("flipImage with no flip should return the source image itself, not a copy")
 	}
 }
 

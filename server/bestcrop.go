@@ -31,8 +31,12 @@ func ProcessFindingCrop(img image.Image, width, height int, processFunc func(str
 	}
 	defer tmpFile.Close()
 
-	// Use png.Encode to encode img to the PNG format with tmpFile as the target writer
-	if err := png.Encode(tmpFile, img); err != nil {
+	// Use png.Encode to encode img to the PNG format with tmpFile as the target
+	// writer. Convert to RGBA first: the png encoder writes color models it does
+	// not recognise — like the *image.YCbCr a JPEG decodes to — at 16 bits per
+	// channel through a per-pixel conversion, which more than triples the encode
+	// time at 12 MP. (imageToRGBA is a no-op for *image.RGBA input.)
+	if err := png.Encode(tmpFile, imageToRGBA(img)); err != nil {
 		return image.Rectangle{}, fmt.Errorf("encoding image: %w", err)
 	}
 
@@ -47,7 +51,11 @@ func ProcessFindingCrop(img image.Image, width, height int, processFunc func(str
 		return image.Rectangle{}, fmt.Errorf("processing image: %w", err)
 	}
 
-	return res, nil
+	// The temp PNG's coordinate space starts at (0,0), but img's own bounds may
+	// not (a GIF's first frame can be anchored at its frame offset, and a
+	// sub-image keeps its parent's coordinates). Translate the result into img's
+	// space so SubImage(res) selects the region the cropper actually chose.
+	return res.Add(img.Bounds().Min), nil
 }
 
 type PythonResult struct {

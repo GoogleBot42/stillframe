@@ -72,6 +72,51 @@ func TestProcessFindingCropWritesDecodablePNG(t *testing.T) {
 	}
 }
 
+// The temp PNG's coordinate space always starts at (0,0), but the input image's
+// bounds may not (a GIF first frame anchored at its frame offset, a sub-image).
+// The returned rectangle must be translated into the image's own space, or the
+// caller's SubImage would select the wrong region — or an empty one.
+func TestProcessFindingCropTranslatesToImageSpace(t *testing.T) {
+	src := image.NewRGBA(image.Rect(100, 50, 300, 200)) // 200x150 at (100,50)
+
+	rect, err := ProcessFindingCrop(src, 40, 20, func(path string, w, h int) (image.Rectangle, error) {
+		// The cropper answers in the PNG's 0-based space.
+		return image.Rect(10, 20, 90, 80), nil
+	})
+	if err != nil {
+		t.Fatalf("ProcessFindingCrop: %v", err)
+	}
+	if want := image.Rect(110, 70, 190, 130); rect != want {
+		t.Errorf("returned rect %v, want %v (translated by the image's origin)", rect, want)
+	}
+}
+
+func TestGetBestPieceOfImageHonoursTheCropRectOnNonZeroOrigin(t *testing.T) {
+	silenceStdout(t)
+	// A 32x16 image anchored at (100,50): left half red, right half blue.
+	src := image.NewRGBA(image.Rect(100, 50, 132, 66))
+	for y := 50; y < 66; y++ {
+		for x := 100; x < 132; x++ {
+			if x < 116 {
+				src.SetRGBA(x, y, color.RGBA{255, 0, 0, 255})
+			} else {
+				src.SetRGBA(x, y, color.RGBA{0, 0, 255, 255})
+			}
+		}
+	}
+	// The stub answers in temp-PNG space: the right (blue) half is (16,0)-(32,16).
+	stubSmartcrop(t, 16, 0, 16, 16)
+
+	got := GetBestPieceOfImage(8, 8, src)
+	if got.Bounds() != image.Rect(0, 0, 8, 8) {
+		t.Fatalf("got %v, want an 8x8 image", got.Bounds())
+	}
+	r, g, b, _ := got.At(4, 4).RGBA()
+	if b <= r || g > 0x2000 {
+		t.Errorf("cropped region should be the blue half, got r=%d g=%d b=%d", r, g, b)
+	}
+}
+
 func TestProcessFindingCropCleansUpOnSuccess(t *testing.T) {
 	var tmpFile, tmpDir string
 	_, err := ProcessFindingCrop(gradientRGBA(4, 4), 10, 10, func(path string, w, h int) (image.Rectangle, error) {

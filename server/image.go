@@ -144,6 +144,12 @@ func clamp(value, min, max float64) float64 {
 }
 
 func flipImage(img image.Image, vertical, horizontal bool) image.Image {
+	// Most panels request no flip; copying a 12 MP source pixel-by-pixel just
+	// to return it unchanged costs ~150 ms and ~90 MiB per request.
+	if !vertical && !horizontal {
+		return img
+	}
+
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
 

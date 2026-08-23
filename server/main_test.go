@@ -2,7 +2,10 @@ package main
 
 import (
 	"errors"
+	"image"
 	"image/color"
+	"image/color/palette"
+	"image/gif"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -264,6 +267,79 @@ func TestFetchImageEndToEnd(t *testing.T) {
 		if !valid[b>>4] || !valid[b&0xF] {
 			t.Fatalf("byte %d = %#x contains a code outside the requested color space", i, b)
 		}
+	}
+}
+
+// The real image directory is mostly JPEGs, which decode to *image.YCbCr, not
+// the *image.RGBA every other handler test feeds the pipeline. The whole
+// pipeline (temp-PNG encode, crop, resize, quantize) must cope with it.
+func TestFetchImageEndToEndJPEG(t *testing.T) {
+	silenceStdout(t)
+	imgDir := t.TempDir()
+	writeTempJPEG(t, imgDir, "only.jpg", gradientRGBA(64, 48))
+	withImageDir(t, imgDir)
+	stubSmartcrop(t, 0, 0, 64, 48)
+
+	const w, h = 16, 8
+	rec := postJSON(t, "/fetchImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
+	}
+	if want := w * h / 2; rec.Body.Len() != want {
+		t.Errorf("got %d bytes, want %d (width*height/2)", rec.Body.Len(), want)
+	}
+}
+
+// A GIF's first frame may be anchored away from the origin (its frame offset in
+// the logical screen), so this is the one decodable input whose bounds don't
+// start at (0,0). The crop rectangle must land inside those bounds; getting the
+// coordinate spaces wrong yields an empty intersection and a 0-byte 200 reply.
+func TestFetchImageEndToEndOffsetFrameGIF(t *testing.T) {
+	silenceStdout(t)
+
+	// The frame offset exceeds the frame size, so an untranslated crop rect
+	// intersects the frame's bounds to an empty rectangle rather than merely a
+	// shifted region — the failure mode is a 0-byte reply, not subtly wrong bytes.
+	frame := image.NewPaletted(image.Rect(100, 50, 164, 98), palette.Plan9) // 64x48 at (100,50)
+	for y := 50; y < 98; y++ {
+		for x := 100; x < 164; x++ {
+			frame.Set(x, y, color.RGBA{uint8(x * 3), uint8(y * 4), 128, 255})
+		}
+	}
+	imgDir := t.TempDir()
+	f, err := os.Create(filepath.Join(imgDir, "only.gif"))
+	if err != nil {
+		t.Fatalf("create gif: %v", err)
+	}
+	if err := gif.EncodeAll(f, &gif.GIF{
+		Image:  []*image.Paletted{frame},
+		Delay:  []int{0},
+		Config: image.Config{ColorModel: color.Palette(palette.Plan9), Width: 164, Height: 98},
+	}); err != nil {
+		t.Fatalf("encode gif: %v", err)
+	}
+	f.Close()
+
+	// Confirm the fixture really decodes with a non-zero origin; otherwise the
+	// test silently stops covering the offset path.
+	decoded, err := ReadImage(filepath.Join(imgDir, "only.gif"))
+	if err != nil {
+		t.Fatalf("ReadImage: %v", err)
+	}
+	if decoded.Bounds().Min == (image.Point{}) {
+		t.Fatal("fixture decoded origin-anchored; it no longer exercises the offset-frame path")
+	}
+
+	withImageDir(t, imgDir)
+	stubSmartcrop(t, 0, 0, 64, 48) // full frame, in temp-PNG space
+
+	const w, h = 16, 8
+	rec := postJSON(t, "/fetchImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
+	}
+	if want := w * h / 2; rec.Body.Len() != want {
+		t.Errorf("got %d bytes, want %d (width*height/2)", rec.Body.Len(), want)
 	}
 }
 
