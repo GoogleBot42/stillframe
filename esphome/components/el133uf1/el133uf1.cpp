@@ -324,21 +324,20 @@ void EL133UF1::send_command_(uint8_t cmd, const uint8_t *data, size_t len, uint8
 // Stream one controller's half of the frame: DTM, then for each of the 1600
 // native rows the 300 bytes covering native columns [px_start, px_start+600).
 void EL133UF1::send_image_half_(uint8_t chips, int px_start) {
-  uint8_t row_buf[HALF_ROW_BYTES];
+  // Word-aligned: IDF's SPI DMA path bounces a transfer whose address or length
+  // is not aligned to the controller's requirement, and 300 bytes already is.
+  alignas(4) uint8_t row_buf[HALF_ROW_BYTES];
 
   select_chips_(chips, true);
   this->enable();
   this->transfer_byte(REG_DTM);
 
   for (int py = 0; py < NATIVE_HEIGHT; py++) {
-    if (rotation_ == 0) {
-      // Buffer rows are already native portrait rows.
-      this->write_array(native_half_row(buffer_, py, px_start), HALF_ROW_BYTES);
-    } else {
-      // Buffer is landscape (1600x1200); rotate while splitting.
-      build_rotated_half_row(buffer_, rotation_, py, px_start, row_buf);
-      this->write_array(row_buf, HALF_ROW_BYTES);
-    }
+    // Always via row_buf: buffer_ is PSRAM and write_array() is DMA-backed, so
+    // the bus never sees an external-RAM pointer (rotation 0 copies, 90/270
+    // gather from the landscape buffer while splitting).
+    build_half_row(buffer_, rotation_, py, px_start, row_buf);
+    this->write_array(row_buf, HALF_ROW_BYTES);
     if ((py & 0x3F) == 0)
       eink_frame::feed_watchdog();
   }
