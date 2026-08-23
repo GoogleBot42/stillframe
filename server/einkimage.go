@@ -211,7 +211,11 @@ func packBytesIntoNibbles(input []byte) []byte {
 		if x+1 < len(input) {
 			low = input[x+1]
 		}
-		output = append(output, (input[x]<<4)|low)
+		// Mask both nibbles. Requests are validated to 4-bit color codes, but
+		// the high nibble is truncated by the shift and the low one was not:
+		// an out-of-range code used to corrupt the pixel beside it, turning a
+		// bad palette into a plausible-but-wrong picture instead of an error.
+		output = append(output, (input[x]&0x0F)<<4|(low&0x0F))
 	}
 
 	return output

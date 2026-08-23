@@ -60,19 +60,25 @@ func TestPackBytesIntoNibblesOddLengthPads(t *testing.T) {
 	}
 }
 
-// Color codes wider than 4 bits are silently truncated in the high nibble
-// (input[x]<<4 on a byte drops the top 4 bits) but preserved in the low nibble.
-// No shipped palette uses codes > 15, but the asymmetry is worth pinning.
-func TestPackBytesIntoNibblesTruncatesHighNibble(t *testing.T) {
-	got := packBytesIntoNibbles([]byte{0x1F, 0x1F})
-	want := []byte{0xFF} // high: (0x1F<<4)&0xFF = 0xF0, low: 0x1F -> 0xFF after OR
-	if !bytes.Equal(got, want) {
-		t.Errorf("got %#v, want %#v", got, want)
+// Color codes wider than 4 bits are truncated to their low nibble on both
+// halves of the byte. decodeImageProps rejects such codes outright, so this is
+// defence in depth: the point is that a stray code can only be wrong about its
+// own pixel, never about the one next to it.
+func TestPackBytesIntoNibblesMasksBothNibbles(t *testing.T) {
+	cases := []struct {
+		in   []byte
+		want []byte
+	}{
+		{[]byte{0x1F, 0x1F}, []byte{0xFF}},
+		{[]byte{0x0, 0x1F}, []byte{0x0F}}, // the neighbouring pixel is untouched
+		{[]byte{0xF0, 0xF0}, []byte{0x00}},
+		{[]byte{0x0, 0xF0}, []byte{0x00}},
+		{[]byte{0xFF, 0x0}, []byte{0xF0}},
 	}
-	// The low nibble is NOT masked, so an out-of-range code corrupts the byte:
-	got = packBytesIntoNibbles([]byte{0x0, 0x1F})
-	if got[0] != 0x1F {
-		t.Errorf("low nibble is unmasked; got %#v, want 0x1f", got)
+	for _, tc := range cases {
+		if got := packBytesIntoNibbles(tc.in); !bytes.Equal(got, tc.want) {
+			t.Errorf("packBytesIntoNibbles(%#v) = %#v, want %#v", tc.in, got, tc.want)
+		}
 	}
 }
 
