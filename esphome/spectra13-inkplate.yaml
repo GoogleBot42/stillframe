@@ -62,5 +62,10 @@ el133uf1:
   pwr_en_pin: GPIO21
   bs0_pin: GPIO6
   bs1_pin: GPIO5
-  # 0 = portrait, 90/270 = landscape (swap 90 <-> 270 if image is upside down)
-  rotation: 90
+  # 0 = portrait; 90 and 270 are the two landscape mounts and differ by exactly
+  # 180 degrees, so swapping them is the fix for an upside-down picture.
+  # 270 is the one confirmed against the physical board (USB-C/kickstand down):
+  # issue #13 reported the previous default of 90 rendering every photo upside
+  # down. The corner mapping each value produces is pinned by the host tests
+  # (esphome/tests/test_el133uf1_image.cpp).
+  rotation: 270
