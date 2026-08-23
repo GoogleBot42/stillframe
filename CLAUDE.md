@@ -12,7 +12,7 @@ Stillframe is an e-ink picture frame system with two components:
 
 - This sandbox has **no serial/USB access and no route to the user's LAN** — it can never see the frame, `homeassistant.local`, or Home Assistant. Validate firmware with `esphome … compile` and the host tests; every physical step (esptool, button holds, HA UI actions) is run by the user, who pastes output back. The proven flash/debug loop, including the recipes to hand the user, is in `.claude/skills/device-debug/`.
 - Cutting a release is `.claude/skills/cut-release/` — the agent tags via the Gitea API (it cannot push tags to `origin`), then polls the GitHub mirror's CI and verifies the live Pages manifest (~5 minutes typically; up to ~30 on cold caches).
-- User preference: delegate substantial implementation and research work to subagents, and launch code-review and verification subagents after any substantive change before considering it done.
+- User preference: prefer delegating work to **Opus subagents** and verify their work — launch code-review and verification subagents after any substantive change before considering it done.
 
 ## Build Commands
 
