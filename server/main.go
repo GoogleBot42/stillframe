@@ -232,9 +232,6 @@ type ImageProperties struct {
 	ColorSpace    ColorSpace `json:"color_space"`
 }
 
-// decodeImageProps decodes and validates a request body, answering 400 itself
-// when either fails. The bodies come from the network, so every field that the
-// image pipeline divides by or indexes with has to be checked here.
 // rejectBody answers a body that could not be read: over the byte cap is 413,
 // anything else is a malformed 400.
 func rejectBody(w http.ResponseWriter, err error) {
@@ -246,6 +243,9 @@ func rejectBody(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), http.StatusBadRequest)
 }
 
+// decodeImageProps decodes and validates a request body, answering 400 itself
+// when either fails. The bodies come from the network, so every field that the
+// image pipeline divides by or indexes with has to be checked here.
 func decodeImageProps(w http.ResponseWriter, r *http.Request) (ImageProperties, bool) {
 	var imageProps ImageProperties
 
