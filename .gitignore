@@ -3,3 +3,6 @@ result
 esphome/secrets.yaml
 esphome/.esphome/
 __pycache__/
+
+# Claude Code local runtime state (skills/rules stay tracked)
+.claude/settings.local.json

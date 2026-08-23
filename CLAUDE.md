@@ -8,6 +8,12 @@ Stillframe is an e-ink picture frame system with two components:
 - **Server** (Go) — HTTP server that processes images and converts them for e-ink displays
 - **ESPHome** (YAML + C++) — ESPHome-based firmware with HA integration, OTA, and deep sleep
 
+## Working Environment (agents)
+
+- This sandbox has **no serial/USB access and no route to the user's LAN** — it can never see the frame, `homeassistant.local`, or Home Assistant. Validate firmware with `esphome … compile` and the host tests; every physical step (esptool, button holds, HA UI actions) is run by the user, who pastes output back. The proven flash/debug loop, including the recipes to hand the user, is in `.claude/skills/device-debug/`.
+- Cutting a release is `.claude/skills/cut-release/` — the agent tags via the Gitea API (it cannot push tags to `origin`), then polls the GitHub mirror's CI and verifies the live Pages manifest (~5 minutes typically; up to ~30 on cold caches).
+- User preference: delegate substantial implementation and research work to subagents, and launch code-review and verification subagents after any substantive change before considering it done.
+
 ## Build Commands
 
 ```bash
@@ -79,7 +85,7 @@ Key files:
 
 **Releases (`.github/workflows/firmware.yml`, `site/README.md`)**
 
-Gitea (`git.neet.dev/zuckerberg/stillframe`) is the source of truth; `github.com/GoogleBot42/stillframe` is a read-only push mirror that builds and hosts — never commit, tag, or edit there. The workflow fires **only** on a mirrored `vX.Y.Z` tag (plus `workflow_dispatch` against an existing tag): it stamps `firmware_version` with the tag minus its leading `v`, builds all five factory configs, attaches the binaries and manifests to the GitHub Release, and deploys the Pages site devices poll. There is no `VERSION` file — the tag *is* the version. Cut a release on Gitea with `git tag -a v1.3.0 -m v1.3.0 && git push origin v1.3.0`; a prerelease suffix (`v1.3.0-rc.1`) builds and archives without moving the Pages channel.
+Gitea (`git.neet.dev/zuckerberg/stillframe`) is the source of truth; `github.com/GoogleBot42/stillframe` is a read-only push mirror that builds and hosts — never commit, tag, or edit there. The workflow fires **only** on a mirrored `vX.Y.Z` tag (plus `workflow_dispatch` against an existing tag): it stamps `firmware_version` with the tag minus its leading `v`, builds all five factory configs, attaches the binaries and manifests to the GitHub Release, and deploys the Pages site devices poll. There is no `VERSION` file — the tag *is* the version. A human with push rights cuts a release on Gitea with `git tag -a v1.3.0 -m v1.3.0 && git push origin v1.3.0`; an agent cannot push tags to `origin` and instead tags through the Gitea API — full procedure in `.claude/skills/cut-release/`. A prerelease suffix (`v1.3.0-rc.1`) builds and archives without moving the Pages channel.
 
 Five device variants (`color7-tinypico`, `color7-tinys3`, `grey16-tinypico`, `grey16-tinys3`, `spectra13-inkplate`):
 - `color7-*` — 7-color EPD7IN3F on TinyPico (ESP32) / TinyS3 (ESP32-S3)
