@@ -117,8 +117,11 @@ class IT8951SPI : public Component,
   bool img_load_open_{false};
   // The burst buffer lives here rather than on the stack of on_image_data_():
   // 2 KiB is a quarter of the loop task's default 8 KiB stack, claimed at the
-  // deepest point of the call chain once per 4 KB HTTP chunk.
-  uint8_t burst_[BURST_SIZE];
+  // deepest point of the call chain once per 4 KB HTTP chunk. Word-aligned
+  // because arduino-esp32's spiWriteNL() reads the buffer with uint32_t loads
+  // — a preceding run of bools would otherwise leave it at offset 1 (mod 4)
+  // and fault with LoadStoreAlignment on the first burst.
+  alignas(uint32_t) uint8_t burst_[BURST_SIZE];
 };
 
 }  // namespace it8951_spi
