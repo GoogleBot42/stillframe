@@ -8,6 +8,7 @@ import (
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -265,23 +266,45 @@ func TestExifOrientationOutOfRangeValues(t *testing.T) {
 	}
 }
 
-// A file made of nothing but 0xFF padding used to be a plausible infinite loop;
-// the scan budget has to end it.
-func TestExifOrientationTerminatesOnPathologicalInput(t *testing.T) {
-	data := append([]byte{0xFF, 0xD8}, bytes.Repeat([]byte{0xFF}, 4<<20)...)
-	if got := exifOrientation(bytes.NewReader(data)); got != 1 {
-		t.Errorf("got %d, want 1", got)
+// countingReader records how much of its source was actually consumed.
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+// A file made of nothing but 0xFF padding, or of segments that claim to be huge
+// and never yield EXIF, must not turn into an unbounded read. The scan budget
+// is what has to end both, so this checks the bytes consumed rather than just
+// that the call returns.
+func TestExifOrientationBoundsPathologicalInput(t *testing.T) {
+	const oversized = 8 << 20 // comfortably past maxSegmentScan
+
+	padding := append([]byte{0xFF, 0xD8}, bytes.Repeat([]byte{0xFF}, oversized)...)
+
+	declared := []byte{0xFF, 0xD8}
+	for len(declared) < oversized {
+		declared = append(declared, 0xFF, 0xE2)
+		declared = append(declared, putU16(binary.BigEndian, 0xFFFF)...)
+		declared = append(declared, make([]byte, 0xFFFF-2)...)
 	}
 
-	// Segments that claim to be huge but never yield EXIF must also terminate.
-	padded := []byte{0xFF, 0xD8}
-	for i := 0; i < 64; i++ {
-		seg := append([]byte{0xFF, 0xE2}, putU16(binary.BigEndian, 0xFFFF)...)
-		padded = append(padded, seg...)
-		padded = append(padded, make([]byte, 0xFFFF-2)...)
-	}
-	if got := exifOrientation(bytes.NewReader(padded)); got != 1 {
-		t.Errorf("padded: got %d, want 1", got)
+	for name, data := range map[string][]byte{"0xff padding": padding, "declared segments": declared} {
+		counter := &countingReader{r: bytes.NewReader(data)}
+		if got := exifOrientation(counter); got != 1 {
+			t.Errorf("%s: got %d, want 1", name, got)
+		}
+		// bufio reads ahead a block at a time, so allow a little slack over the
+		// budget - just not the whole file.
+		if limit := maxSegmentScan + (1 << 16); counter.n > limit {
+			t.Errorf("%s: read %d bytes of a %d byte file, want at most %d",
+				name, counter.n, len(data), limit)
+		}
 	}
 }
 

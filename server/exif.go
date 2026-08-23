@@ -63,11 +63,11 @@ func findExifSegment(r *bufio.Reader) ([]byte, error) {
 
 	scanned := 2
 	for scanned < maxSegmentScan {
-		marker, err := nextMarker(r)
+		marker, n, err := nextMarker(r, maxSegmentScan-scanned)
+		scanned += n
 		if err != nil {
 			return nil, err
 		}
-		scanned += 2
 
 		switch {
 		case marker == 0xD8 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7):
@@ -111,26 +111,36 @@ func findExifSegment(r *bufio.Reader) ([]byte, error) {
 	return nil, errNoOrientation
 }
 
-// nextMarker reads the 0xFF-prefixed marker that starts the next segment. Any
-// number of extra 0xFF bytes may pad the gap between segments, so they are
-// skipped rather than treated as the marker itself.
-func nextMarker(r *bufio.Reader) (byte, error) {
+// nextMarker reads the 0xFF-prefixed marker that starts the next segment and
+// reports how many bytes that took, so the caller can charge them to its scan
+// budget. It reads at most budget bytes.
+func nextMarker(r *bufio.Reader, budget int) (byte, int, error) {
+	consumed := 0
+
 	b, err := r.ReadByte()
 	if err != nil {
-		return 0, errNoOrientation
+		return 0, consumed, errNoOrientation
 	}
+	consumed++
 	if b != 0xFF {
-		return 0, errNoOrientation // we are not at a segment boundary
+		return 0, consumed, errNoOrientation // we are not at a segment boundary
 	}
-	for {
+
+	// Any number of extra 0xFF bytes may pad the gap between segments, so they
+	// are skipped rather than taken for the marker. The budget is what stops a
+	// file that is nothing but padding from being read all the way to its end.
+	for consumed < budget {
 		b, err = r.ReadByte()
 		if err != nil {
-			return 0, errNoOrientation
+			return 0, consumed, errNoOrientation
 		}
+		consumed++
 		if b != 0xFF {
-			return b, nil
+			return b, consumed, nil
 		}
 	}
+
+	return 0, consumed, errNoOrientation
 }
 
 // tiffOrientation parses the little TIFF file that an EXIF APP1 segment
