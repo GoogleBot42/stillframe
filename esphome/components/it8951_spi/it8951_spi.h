@@ -39,6 +39,11 @@ static const uint16_t PREAMBLE_CMD = 0x6000;
 static const uint16_t PREAMBLE_WRITE = 0x0000;
 static const uint16_t PREAMBLE_READ = 0x1000;
 
+// One "write data" SPI cycle's worth of packed words. Sized to keep the
+// per-burst preamble overhead small without ever coming near the controller's
+// input FIFO limit.
+static const size_t BURST_SIZE = 2048;
+
 struct IT8951DevInfo {
   uint16_t panel_w;
   uint16_t panel_h;
@@ -70,19 +75,23 @@ class IT8951SPI : public Component,
   void on_begin_image_() override;
   void on_image_data_(size_t offset, const uint8_t *data, size_t len) override;
   void on_image_end_() override;
-  void on_finish_image_(bool complete) override;
+  bool on_finish_image_(bool complete) override;
 
+  // Every SPI helper below starts with an HRDY wait and returns false once the
+  // controller has stopped answering, so a command sequence can be abandoned
+  // instead of clocking bytes into nothing. The read helpers return data and
+  // report failure through comm_failed_ instead.
   bool wait_ready_(uint32_t timeout_ms);
-  void lcd_write_cmd_(uint16_t cmd);
-  void lcd_write_data_(uint16_t data);
+  bool lcd_write_cmd_(uint16_t cmd);
+  bool lcd_write_data_(uint16_t data);
   uint16_t lcd_read_data_();
   void lcd_read_n_data_(uint16_t *buf, uint32_t word_count);
-  void lcd_send_cmd_arg_(uint16_t cmd, uint16_t *args, uint16_t num_args);
+  bool lcd_send_cmd_arg_(uint16_t cmd, uint16_t *args, uint16_t num_args);
 
-  void get_system_info_();
-  void write_reg_(uint16_t addr, uint16_t value);
+  bool get_system_info_();
+  bool write_reg_(uint16_t addr, uint16_t value);
   uint16_t read_reg_(uint16_t addr);
-  void set_img_buf_base_addr_(uint32_t addr);
+  bool set_img_buf_base_addr_(uint32_t addr);
   bool wait_for_display_ready_(uint32_t timeout_ms);
   void write_burst_(const uint8_t *data, size_t len);
 
@@ -92,6 +101,15 @@ class IT8951SPI : public Component,
   IT8951DevInfo dev_info_{};
   uint32_t img_buf_addr_{0};
   WordPacker packer_;
+  // Latched by wait_ready_() the first time HRDY does not come back, cleared at
+  // the start of every transfer. Without it a disconnected panel burns two 5 s
+  // HRDY timeouts per burst — ~1.8 hours for a 1872x1404 image — and still ends
+  // in a success log.
+  bool comm_failed_{false};
+  // The burst buffer lives here rather than on the stack of on_image_data_():
+  // 2 KiB is a quarter of the loop task's default 8 KiB stack, claimed at the
+  // deepest point of the call chain once per 4 KB HTTP chunk.
+  uint8_t burst_[BURST_SIZE];
 };
 
 }  // namespace it8951_spi

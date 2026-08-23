@@ -30,14 +30,18 @@ class EPD7IN3F : public Component,
   const eink_frame::ColorSpace &get_color_space() const override { return eink_frame::COLOR7_COLOR_SPACE; }
   void on_begin_image_() override;
   void on_image_data_(size_t offset, const uint8_t *data, size_t len) override;
-  void on_finish_image_(bool complete) override;
+  bool on_finish_image_(bool complete) override;
 
-  void init_panel_();
+  // All four return false when the panel stopped answering (a busy-wait
+  // timeout), so the caller can abandon the rest of the sequence instead of
+  // pushing commands into a controller that is not there.
+  bool init_panel_();
+  bool wake_panel_();
   void reset_();
   void send_command_(uint8_t command);
   void send_data_(uint8_t data);
-  bool wait_busy_(uint32_t timeout_ms);
-  void turn_on_display_();
+  bool wait_busy_(uint32_t timeout_ms, const char *phase);
+  bool turn_on_display_();
 
   GPIOPin *dc_pin_;
   GPIOPin *reset_pin_;

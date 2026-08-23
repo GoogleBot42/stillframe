@@ -129,7 +129,13 @@ class EinkFrameDisplay {
   // Optional end-of-data marker, sent whether or not the transfer succeeded.
   virtual void on_image_end_() {}
   // Refresh the panel when `complete` is true, otherwise clean up only.
-  virtual void on_finish_image_(bool complete) = 0;
+  //
+  // Returns whether the panel actually completed the refresh. A driver that
+  // gave up — a busy/ready line that never released, a command sequence it had
+  // to abandon — must return false so finish_image() logs the failure instead
+  // of reporting a refresh that never happened. The return value is only
+  // consulted for `complete == true`; on the cleanup path it is ignored.
+  virtual bool on_finish_image_(bool complete) = 0;
 
   // Abort the current transfer (allocation failure, panel did not come up).
   // Remaining chunks are dropped and finish_image() takes the failure path.

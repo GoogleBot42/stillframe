@@ -24,6 +24,12 @@ class FakeDisplay : public EinkFrameDisplay {
   // Make the transfer fail from inside on_begin_image_(), the way el133uf1 does
   // when the PSRAM buffer cannot be allocated.
   bool fail_on_begin{false};
+  // Make the transfer fail from inside on_image_data_(), the way it8951_spi
+  // does when HRDY stops coming back mid-stream.
+  bool fail_on_data{false};
+  // Report a refresh that never completed, the way every driver does when a
+  // panel busy/ready line times out during the update sequence.
+  bool fail_refresh{false};
 
   std::vector<std::string> events;
   std::vector<uint8_t> received;
@@ -58,14 +64,17 @@ class FakeDisplay : public EinkFrameDisplay {
     this->offsets.push_back(offset);
     this->chunk_sizes.push_back(len);
     this->received.insert(this->received.end(), data, data + len);
+    if (this->fail_on_data)
+      this->mark_transfer_failed_();
   }
 
   void on_image_end_() override { this->events.push_back("end"); }
 
-  void on_finish_image_(bool complete) override {
+  bool on_finish_image_(bool complete) override {
     this->events.push_back(complete ? "finish(true)" : "finish(false)");
     this->finish_calls++;
     this->last_complete = complete;
+    return complete && !this->fail_refresh;
   }
 };
 
@@ -350,5 +359,113 @@ TEST(success_is_logged_around_the_refresh) {
     CHECK_EQ_STR("I/fake: Image data sent, refreshing display...", host_log_lines()[0]);
     CHECK_EQ_STR("I/fake: Display refresh complete", host_log_lines()[1]);
   }
+  host_log_lines().clear();
+}
+
+// The bug this whole hook signature exists for: the image arrives intact, the
+// driver issues the refresh, the panel's busy line never comes back — and the
+// log used to say "Display refresh complete" anyway.
+TEST(a_panel_that_never_refreshes_is_not_logged_as_complete) {
+  host_log_lines().clear();
+  FakeDisplay display(6, 4);
+  display.fail_refresh = true;
+  std::vector<uint8_t> data = ramp(12);
+
+  display.begin_image();
+  display.write_image_data(data.data(), 12);
+  display.finish_image(true);
+
+  // The refresh was still attempted — the data was good, only the panel was not.
+  CHECK_EQ_STR("begin,data,end,finish(true)", join(display.events));
+  CHECK_EQ_INT(1, display.finish_calls);
+
+  CHECK_EQ_INT(2, host_log_lines().size());
+  if (host_log_lines().size() == 2) {
+    CHECK_EQ_STR("I/fake: Image data sent, refreshing display...", host_log_lines()[0]);
+    CHECK_EQ_STR("E/fake: Display refresh failed — the panel did not complete the update", host_log_lines()[1]);
+  }
+  host_log_lines().clear();
+}
+
+// The cleanup path never claims success, whatever the driver returns from it:
+// on_finish_image_(false) is "tidy up", not "refresh", and its return value is
+// documented as ignored.
+TEST(cleanup_path_never_logs_a_refresh) {
+  class AlwaysTrueDisplay : public FakeDisplay {
+   public:
+    using FakeDisplay::FakeDisplay;
+
+   protected:
+    bool on_finish_image_(bool complete) override {
+      FakeDisplay::on_finish_image_(complete);
+      return true;
+    }
+  };
+
+  host_log_lines().clear();
+  AlwaysTrueDisplay display(6, 4);
+  std::vector<uint8_t> data = ramp(12);
+
+  display.begin_image();
+  display.write_image_data(data.data(), 12);
+  display.finish_image(false);  // download failed
+
+  CHECK_EQ_STR("begin,data,end,finish(false)", join(display.events));
+  CHECK_EQ_INT(1, host_log_lines().size());
+  if (!host_log_lines().empty())
+    CHECK_EQ_STR("E/fake: Image transfer failed (12/12 bytes) — skipping refresh", host_log_lines()[0]);
+  host_log_lines().clear();
+}
+
+// it8951_spi's mid-stream case: HRDY stops coming back after the first burst,
+// the driver marks the transfer failed, and the rest of the download must be
+// dropped rather than ground through burst by burst.
+TEST(failure_during_the_data_stream_stops_the_transfer) {
+  host_log_lines().clear();
+  FakeDisplay display(6, 4);
+  display.fail_on_data = true;
+  std::vector<uint8_t> data = ramp(12);
+
+  display.begin_image();
+  display.write_image_data(data.data(), 4);
+  display.write_image_data(data.data() + 4, 4);
+  display.write_image_data(data.data() + 8, 4);
+  display.finish_image(true);
+
+  // Only the chunk that tripped the failure reached the driver.
+  CHECK_EQ_STR("begin,data,end,finish(false)", join(display.events));
+  CHECK_EQ_STR("4", join_sizes(display.chunk_sizes));
+  CHECK(!display.last_complete);
+
+  // Reported as the short transfer it is, not as a refresh.
+  CHECK_EQ_INT(1, host_log_lines().size());
+  if (!host_log_lines().empty())
+    CHECK_EQ_STR("E/fake: Image transfer failed (4/12 bytes) — skipping refresh", host_log_lines()[0]);
+  host_log_lines().clear();
+}
+
+// A refresh failure is a property of one transfer, not of the driver: the next
+// wake must start from a clean slate.
+TEST(refresh_failure_does_not_poison_the_next_transfer) {
+  FakeDisplay display(6, 4);
+  display.fail_refresh = true;
+  std::vector<uint8_t> data = ramp(12);
+
+  display.begin_image();
+  display.write_image_data(data.data(), 12);
+  display.finish_image(true);
+
+  display.fail_refresh = false;
+  display.events.clear();
+  host_log_lines().clear();
+
+  display.begin_image();
+  display.write_image_data(data.data(), 12);
+  display.finish_image(true);
+
+  CHECK_EQ_STR("begin,data,end,finish(true)", join(display.events));
+  CHECK_EQ_INT(2, host_log_lines().size());
+  if (host_log_lines().size() == 2)
+    CHECK_EQ_STR("I/fake: Display refresh complete", host_log_lines()[1]);
   host_log_lines().clear();
 }

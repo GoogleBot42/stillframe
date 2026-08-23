@@ -145,7 +145,9 @@ void EL133UF1::on_image_data_(size_t offset, const uint8_t *data, size_t len) {
   memcpy(buffer_ + offset, data, len);
 }
 
-void EL133UF1::on_finish_image_(bool complete) {
+bool EL133UF1::on_finish_image_(bool complete) {
+  bool refreshed = false;
+
   // `powered_` is false if power_on_and_init_() gave up: there is nothing on
   // the other end of the bus worth talking to, so go straight to the power-off
   // path (which also puts the pins back in the discharge state).
@@ -161,14 +163,15 @@ void EL133UF1::on_finish_image_(bool complete) {
       if (wait_busy_(BUSY_TIMEOUT_DATA_MS, "slave controller latching right half (DTM)", HINT_DATA)) {
         delay(PRE_REFRESH_MS);
         send_command_(REG_DRF, DRF_V, sizeof(DRF_V), CHIP_BOTH);
-        wait_busy_(BUSY_TIMEOUT_REFRESH_MS, "display refresh (DRF)",
-                   "a full Spectra 6 refresh normally takes 19-25 s");
+        refreshed = wait_busy_(BUSY_TIMEOUT_REFRESH_MS, "display refresh (DRF)",
+                               "a full Spectra 6 refresh normally takes 19-25 s");
       }
     }
   }
 
   power_off_();
   free_buffer_();
+  return refreshed;
 }
 
 void EL133UF1::sleep() { power_off_(); }
