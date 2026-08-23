@@ -224,12 +224,13 @@ bool EPD7IN3F::turn_on_display_() {
 
   // Power the panel back down on every path, including after a failed refresh:
   // the frame is about to deep sleep and the rail must not be left energized.
-  // A timeout here also fails the update — it means the panel stopped
-  // answering, so nothing about this cycle can be trusted.
+  //
+  // A timeout here does *not* invalidate the refresh: DISPLAY_REFRESH has
+  // already released busy by this point, so the image is on the panel. Only
+  // the power-down handshake is in doubt, and wait_busy_() has logged it.
   send_command_(0x02);  // POWER_OFF
   send_data_(0x00);
-  if (!wait_busy_(BUSY_TIMEOUT_INIT_MS, "panel power-down (POWER_OFF)"))
-    refreshed = false;
+  wait_busy_(BUSY_TIMEOUT_INIT_MS, "panel power-down (POWER_OFF)");
 
   return refreshed;
 }

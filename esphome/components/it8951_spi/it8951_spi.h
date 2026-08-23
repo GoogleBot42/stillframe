@@ -105,7 +105,16 @@ class IT8951SPI : public Component,
   // the start of every transfer. Without it a disconnected panel burns two 5 s
   // HRDY timeouts per burst — ~1.8 hours for a 1872x1404 image — and still ends
   // in a success log.
+  //
+  // Cleared at the start of every transfer and by wake()/sleep(), which run
+  // outside the transfer and must each get their own verdict on the panel.
   bool comm_failed_{false};
+  // setup() got the device info and enabled packed mode. Checked by
+  // on_begin_image_() because ESPHome's mark_failed() only stops loop(), and
+  // the fetch script calls begin_image() directly.
+  bool setup_ok_{false};
+  // LD_IMG_AREA went out for the current transfer, so LD_IMG_END is owed.
+  bool img_load_open_{false};
   // The burst buffer lives here rather than on the stack of on_image_data_():
   // 2 KiB is a quarter of the loop task's default 8 KiB stack, claimed at the
   // deepest point of the call chain once per 4 KB HTTP chunk.

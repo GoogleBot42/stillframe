@@ -45,9 +45,15 @@ void IT8951SPI::setup() {
   img_buf_addr_ = dev_info_.img_buf_addr_l | ((uint32_t) dev_info_.img_buf_addr_h << 16);
   ESP_LOGI(TAG, "Image buffer address: 0x%08" PRIX32, img_buf_addr_);
 
-  // Enable I80 packed mode
-  write_reg_(I80CPCR, 0x0001);
+  // Enable I80 packed mode. Not optional: without it the controller
+  // misinterprets every image we then send, and would still report success.
+  if (!write_reg_(I80CPCR, 0x0001)) {
+    ESP_LOGE(TAG, "IT8951 did not accept the I80 packed-mode register write");
+    this->mark_failed();
+    return;
+  }
 
+  setup_ok_ = true;
   ESP_LOGI(TAG, "IT8951 initialized");
 }
 
@@ -58,6 +64,17 @@ void IT8951SPI::on_begin_image_() {
   // A previous transfer may have given up on the panel; this one gets a fresh
   // verdict.
   comm_failed_ = false;
+  img_load_open_ = false;
+
+  // mark_failed() only stops loop() — begin_image() is called straight from the
+  // fetch script, so setup failures have to be checked here too. Without the
+  // device info img_buf_addr_ is 0 and the image would be streamed to
+  // controller address 0 and then reported as a successful refresh.
+  if (!setup_ok_) {
+    ESP_LOGE(TAG, "IT8951 was never initialized — abandoning transfer");
+    this->mark_transfer_failed_();
+    return;
+  }
 
   if (!wait_for_display_ready_(REFRESH_TIMEOUT_MS) || !set_img_buf_base_addr_(img_buf_addr_)) {
     ESP_LOGE(TAG, "IT8951 is not ready to accept an image — abandoning transfer");
@@ -74,7 +91,9 @@ void IT8951SPI::on_begin_image_() {
   if (!lcd_send_cmd_arg_(IT8951_TCON_LD_IMG_AREA, args, 5)) {
     ESP_LOGE(TAG, "IT8951 did not accept the image-load command — abandoning transfer");
     this->mark_transfer_failed_();
+    return;
   }
+  img_load_open_ = true;
 }
 
 // The controller keeps its own write pointer inside the loaded image area, so
@@ -109,7 +128,16 @@ void IT8951SPI::write_burst_(const uint8_t *data, size_t len) {
   this->disable();
 }
 
-void IT8951SPI::on_image_end_() { lcd_write_cmd_(IT8951_TCON_LD_IMG_END); }
+// Closes the image-load command — but only if one was ever opened. The hook
+// runs on every path, including the one where on_begin_image_() gave up before
+// LD_IMG_AREA, and a stray LD_IMG_END there is a command the controller never
+// asked for.
+void IT8951SPI::on_image_end_() {
+  if (!img_load_open_)
+    return;
+  img_load_open_ = false;
+  lcd_write_cmd_(IT8951_TCON_LD_IMG_END);
+}
 
 bool IT8951SPI::on_finish_image_(bool complete) {
   if (!complete)
@@ -128,13 +156,27 @@ bool IT8951SPI::on_finish_image_(bool complete) {
   return wait_for_display_ready_(REFRESH_TIMEOUT_MS);
 }
 
+// wake() and sleep() are called by the fetch script *outside* the
+// begin/finish pair, so they clear the latch themselves: a transfer that gave
+// up on the panel must not silently turn the following power-state command
+// into a no-op that still logs success. Each gets one fresh HRDY budget.
 void IT8951SPI::wake() {
-  lcd_write_cmd_(IT8951_TCON_SYS_RUN);
+  comm_failed_ = false;
+  if (!lcd_write_cmd_(IT8951_TCON_SYS_RUN)) {
+    ESP_LOGE(TAG, "Display did not accept the wake command");
+    return;
+  }
   ESP_LOGI(TAG, "Display woken up");
 }
 
 void IT8951SPI::sleep() {
-  lcd_write_cmd_(IT8951_TCON_SLEEP);
+  comm_failed_ = false;
+  if (!lcd_write_cmd_(IT8951_TCON_SLEEP)) {
+    // Worth an error rather than a shrug: the panel stays in run mode for the
+    // whole deep-sleep window, which costs battery.
+    ESP_LOGE(TAG, "Display did not accept the sleep command — it may stay powered through deep sleep");
+    return;
+  }
   ESP_LOGI(TAG, "Display entered sleep mode");
 }
 

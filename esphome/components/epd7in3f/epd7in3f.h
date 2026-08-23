@@ -32,9 +32,9 @@ class EPD7IN3F : public Component,
   void on_image_data_(size_t offset, const uint8_t *data, size_t len) override;
   bool on_finish_image_(bool complete) override;
 
-  // All four return false when the panel stopped answering (a busy-wait
-  // timeout), so the caller can abandon the rest of the sequence instead of
-  // pushing commands into a controller that is not there.
+  // The bool-returning helpers below return false when the panel stopped
+  // answering (a busy-wait timeout), so the caller can abandon the rest of the
+  // sequence instead of pushing commands into a controller that is not there.
   bool init_panel_();
   bool wake_panel_();
   void reset_();
