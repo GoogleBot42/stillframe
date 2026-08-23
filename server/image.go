@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"io"
 	"math"
 	"os"
 )
@@ -16,12 +17,23 @@ func ReadImage(name string) (image.Image, error) {
 	}
 	defer file.Close()
 
+	// Read the EXIF orientation before decoding: image/jpeg throws the metadata
+	// away, so by the time we have pixels the "turn me 90 degrees" that phone
+	// cameras record is gone. Non-JPEGs fail the SOI check immediately and come
+	// back as orientation 1, so PNG and GIF pass through untouched.
+	orientation := exifOrientation(file)
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewinding %q: %w", name, err)
+	}
+
 	img, _, err := image.Decode(file)
 	if err != nil {
 		return nil, fmt.Errorf("decoding %q: %w", name, err)
 	}
 
-	return img, nil
+	// Normalise here, ahead of everything: smart crop, resize and the device's
+	// own flip_vertical/flip_horizonal transform all assume upright input.
+	return applyExifOrientation(img, orientation), nil
 }
 
 func imageToRGBA(src image.Image) *image.RGBA {
