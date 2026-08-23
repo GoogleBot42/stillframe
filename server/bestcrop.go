@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -10,12 +12,34 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/nfnt/resize"
 )
 
+// smartcropTimeout bounds a single smartcrop-cli run. Smart cropping a large
+// photo on a slow SBC can legitimately take several seconds, so this is
+// deliberately generous; past it the interpreter is wedged (PIL on a truncated
+// file, a stalled network mount) and waiting forever would pin the handler
+// goroutine, keep the full-size temp PNG on disk, and strand another Python
+// process on every wake until the box runs out of memory or disk.
+const smartcropTimeout = 30 * time.Second
+
+// waitDelay bounds how long the pipe copy may outlive the killed child.
+const waitDelay = 5 * time.Second
+
+// stderrTail caps how much of a failed subprocess's output reaches the log.
+const stderrTail = 2048
+
 // Writes the file as a PNG to a temporary file for the purpose of processing the image using another program
-func ProcessFindingCrop(img image.Image, width, height int, processFunc func(string, int, int) (image.Rectangle, error)) (image.Rectangle, error) {
+func ProcessFindingCrop(ctx context.Context, img image.Image, width, height int, processFunc func(context.Context, string, int, int) (image.Rectangle, error)) (image.Rectangle, error) {
+	// Encoding a 12 MP PNG is the expensive half of this function, so do not
+	// start it for a request that has already gone away.
+	if err := ctx.Err(); err != nil {
+		return image.Rectangle{}, fmt.Errorf("crop abandoned: %w", err)
+	}
+
 	// Create a temporary directory
 	tmpDir, err := ioutil.TempDir("", "image_processing")
 	if err != nil {
@@ -46,7 +70,7 @@ func ProcessFindingCrop(img image.Image, width, height int, processFunc func(str
 	}
 
 	// Run the process function
-	res, err := processFunc(tmpFile.Name(), width, height)
+	res, err := processFunc(ctx, tmpFile.Name(), width, height)
 	if err != nil {
 		return image.Rectangle{}, fmt.Errorf("processing image: %w", err)
 	}
@@ -67,22 +91,66 @@ type PythonResult struct {
 
 // Go's smartcrop selects terrible crops.  Of my test images it never selected the face.
 // But the python smartcrop works great.  So save to a file and execute the python one instead.
-func pythonSmartcrop(filename string, width, height int) (image.Rectangle, error) {
-	cmd := exec.Command("smartcrop-cli", filename, strconv.Itoa(width), strconv.Itoa(height))
+func pythonSmartcrop(ctx context.Context, filename string, width, height int) (image.Rectangle, error) {
+	ctx, cancel := context.WithTimeout(ctx, smartcropTimeout)
+	defer cancel()
+
+	started := time.Now()
+	cmd := exec.CommandContext(ctx, "smartcrop-cli", filename, strconv.Itoa(width), strconv.Itoa(height))
+	// Killing the child is not enough on its own: Output() also waits for the
+	// stdout pipe to close, and any grandchild still holding it would keep the
+	// handler blocked long past the deadline. Give the copy a hard stop too.
+	cmd.WaitDelay = waitDelay
 
 	output, err := cmd.Output()
 	if err != nil {
-		return image.Rectangle{}, fmt.Errorf("running python script: %w", err)
+		// The child's own diagnostics are the only thing that explains the
+		// failure; without them the log reads "exit status 1" while every
+		// image silently center-crops.
+		detail := stderrDetail(err)
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			return image.Rectangle{}, fmt.Errorf("running python script: timed out after %s (%w)%s", time.Since(started).Round(time.Millisecond), ctx.Err(), detail)
+		case errors.Is(ctx.Err(), context.Canceled):
+			return image.Rectangle{}, fmt.Errorf("running python script: canceled after %s (%w)%s", time.Since(started).Round(time.Millisecond), ctx.Err(), detail)
+		}
+		return image.Rectangle{}, fmt.Errorf("running python script: %w%s", err, detail)
 	}
 
 	var result PythonResult
 	err = json.Unmarshal(output, &result)
 	if err != nil {
-		return image.Rectangle{}, fmt.Errorf("parsing output: %w", err)
+		// Quote what could not be parsed - a cropper that prints a warning
+		// before its JSON exits 0, so stderrDetail never sees it.
+		return image.Rectangle{}, fmt.Errorf("parsing output %q: %w", truncate(string(output)), err)
 	}
 
 	rect := image.Rect(result.X, result.Y, result.X+result.Width, result.Y+result.Height)
 	return rect, nil
+}
+
+// stderrDetail renders the stderr an *exec.ExitError carries as a log suffix,
+// or "" when there is nothing to show.
+func stderrDetail(err error) string {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return ""
+	}
+	msg := truncate(strings.TrimSpace(string(exitErr.Stderr)))
+	if msg == "" {
+		return ""
+	}
+	return ": " + msg
+}
+
+// truncate keeps the last stderrTail bytes of a subprocess's output. The tail,
+// because a Python traceback ends with the exception. The cut can land
+// mid-rune, so scrub what it breaks rather than logging invalid UTF-8.
+func truncate(s string) string {
+	if len(s) <= stderrTail {
+		return s
+	}
+	return "..." + strings.ToValidUTF8(s[len(s)-stderrTail:], "")
 }
 
 // centerCrop returns the largest centered sub-rectangle of bounds that has the
@@ -111,17 +179,34 @@ func centerCrop(bounds image.Rectangle, width, height int) image.Rectangle {
 	return image.Rect(x, y, x+cropW, y+cropH)
 }
 
-func GetBestPieceOfImage(width, height int, img image.Image) image.Image {
+// snapToAspect confines a crop rectangle to the image and shrinks it to the
+// panel's exact aspect ratio. The cropper answers in whole pixels, so its
+// rectangle is always a fraction of a percent off the requested ratio, and the
+// resize that follows is exact-size - the difference would come out as an
+// anisotropic stretch. A rectangle that does not overlap the image at all (a
+// confused cropper) degrades to a centered crop of the whole image, which is
+// also what the fallback path asks for.
+func snapToAspect(r, bounds image.Rectangle, width, height int) image.Rectangle {
+	r = r.Intersect(bounds)
+	if r.Empty() {
+		r = bounds
+	}
+	return centerCrop(r, width, height)
+}
+
+func GetBestPieceOfImage(ctx context.Context, width, height int, img image.Image) image.Image {
 	// analyzer := smartcrop.NewAnalyzer(nfnt.NewDefaultResizer())
 	// bestCrop, _ := analyzer.FindBestCrop(img, 800, 480)
 
 	fmt.Println("Finding best image crop...")
 
-	bestCrop, err := ProcessFindingCrop(img, width, height, pythonSmartcrop)
+	bestCrop, err := ProcessFindingCrop(ctx, img, width, height, pythonSmartcrop)
 	if err != nil {
 		log.Printf("warning: smart crop failed (%v); falling back to a centered crop", err)
-		bestCrop = centerCrop(img.Bounds(), width, height)
+		bestCrop = img.Bounds()
 	}
+
+	bestCrop = snapToAspect(bestCrop, img.Bounds(), width, height)
 
 	fmt.Printf("Best crop: %+v\n", bestCrop)
 

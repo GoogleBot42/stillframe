@@ -372,7 +372,7 @@ func fetchImage(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Serving random image file:", randomImgFile)
 
 	flippedImage := flipImage(img, imageProps.FlipVertical, imageProps.FlipHorizonal)
-	bestCrop := GetBestPieceOfImage(imageProps.Width, imageProps.Height, flippedImage)
+	bestCrop := GetBestPieceOfImage(r.Context(), imageProps.Width, imageProps.Height, flippedImage)
 	data := ConvertToEInkImage(bestCrop, imageProps.ColorSpace)
 
 	fmt.Printf("Bytes to send: %+v\n", len(data))

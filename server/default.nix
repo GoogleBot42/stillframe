@@ -44,7 +44,8 @@ let
 
     nativeBuildInputs = [ makeWrapper ];
 
-    phases = [ "installPhase" ]; # Removes all phases except installPhase
+    # Removes all phases except these two
+    phases = [ "installPhase" "installCheckPhase" ];
 
     installPhase = ''
       mkdir -p $out
@@ -56,6 +57,29 @@ let
       makeWrapper ${python3}/bin/python3 $out/bin/smartcrop-cli \
         --prefix PYTHONPATH : ${makePythonPath [smartcrop]} \
         --add-flags "$out/smartcrop-cli.py"
+    '';
+
+    # The server treats a failing cropper as a soft error and falls back to a
+    # centered crop, so a smartcrop-cli that cannot run at all is invisible at
+    # runtime - which is exactly how smartcrop.py's use of the long-removed
+    # Image.ANTIALIAS came to break every crop silently. Prove the thing runs
+    # against the Pillow it is actually packaged with, and still prints the
+    # integer JSON the Go side unmarshals.
+    doInstallCheck = true;
+
+    installCheckPhase = ''
+      PYTHONPATH=${makePythonPath [ pillow ]} ${python3}/bin/python3 -c \
+        "from PIL import Image; Image.new('RGB', (240, 180), (30, 60, 90)).save('probe.png')"
+
+      $out/bin/smartcrop-cli probe.png 1200 1600 > crop.json
+
+      ${python3}/bin/python3 -c "
+      import json
+      crop = json.load(open('crop.json'))
+      for key in ('x', 'y', 'width', 'height'):
+          assert isinstance(crop[key], int), (key, crop)
+      assert crop['width'] > 0 and crop['height'] > 0, crop
+      "
     '';
   };
 
