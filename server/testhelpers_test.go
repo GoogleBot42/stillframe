@@ -309,11 +309,24 @@ func mustJSON(t *testing.T, v interface{}) *bytes.Reader {
 
 // withImageDir points the package-level imageDir at dir for the duration of the
 // test.
+// It also clears the "last served" memory, so a directory installed by one test
+// is never judged against a file another test served.
 func withImageDir(t *testing.T, dir string) {
 	t.Helper()
 	old := imageDir
 	imageDir = dir
 	t.Cleanup(func() { imageDir = old })
+	withLastServed(t, "")
+}
+
+// withLastServed pins the "file the previous request served" memory for the
+// duration of the test, and restores it afterwards so the no-repeat state does
+// not leak between tests.
+func withLastServed(t *testing.T, path string) {
+	t.Helper()
+	old := lastServed()
+	rememberServed(path)
+	t.Cleanup(func() { rememberServed(old) })
 }
 
 // silenceStdout redirects os.Stdout for the duration of the test; the handlers
