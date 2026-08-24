@@ -41,6 +41,21 @@ esphome:
   on_boot:
     - priority: -100.0
       then:
+        # Snapshot "was this frame already provisioned when it booted?" before
+        # anything can change it. WiFiComponent::start() loads the saved
+        # credentials during its own setup (setup_priority::WIFI, i.e. long
+        # before this priority -100 automation) and improv_serial can only
+        # call set_sta() from its loop(), which has not run yet — so has_sta()
+        # here is exactly "credentials were in NVS at power-on".
+        #
+        # maybe_sleep needs that distinction because has_sta() alone cannot
+        # tell "the user is provisioning right now" (set_sta() makes it true
+        # for the whole 30 s connection attempt) from "provisioned frame whose
+        # AP is down" — and those two want opposite answers: wait for the
+        # connection and fetch, versus go back to sleep.
+        - globals.set:
+            id: had_wifi_creds_at_boot
+            value: !lambda return wifi::global_wifi_component->has_sta();
         # Holding the wake button through the reset is the no-Home-Assistant
         # escape hatch for opening an OTA window: it simply turns the "Prevent
         # Deep Sleep" switch on, so there is exactly ONE piece of state that
@@ -199,6 +214,33 @@ globals:
     restore_value: true
     initial_value: "false"
   - id: api_connected_this_boot
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  # Set by fetch_and_display when a fetch actually finishes and the panel has
+  # been given a complete image. Deliberately NOT set for a failed attempt: the
+  # flag answers "does the panel already show something from this boot?", and a
+  # failure leaves the old (or, on a fresh frame, blank) picture up — which is
+  # exactly the case the provisioning hand-off below still needs to cover.
+  - id: image_shown_this_boot
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  # Snapshot of has_sta() taken in on_boot, before improv_serial's loop can run
+  # — see the comment there.
+  - id: had_wifi_creds_at_boot
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  # True exactly while await_provisioning is parked on its wait_until, i.e.
+  # while there is a hand-off that a deep sleep would kill. maybe_sleep sets it
+  # when it arms the script (and only when the script was not already running,
+  # so a dropped `script.execute` cannot leave it lying) and await_provisioning
+  # clears it the moment its wait completes. `script.is_running` cannot stand in
+  # for this: ESPHome plays scripts inline, so it is also true for
+  # await_provisioning -> fetch_and_display -> maybe_sleep, which would make the
+  # frame hold itself awake for a script that is about to unwind.
+  - id: provisioning_handoff_parked
     type: bool
     restore_value: false
     initial_value: "false"
@@ -431,8 +473,13 @@ script:
                     // frame buffer) is not left half-open.
                     id(epaper_display).finish_image(ok);
                   }
-                  if (ok)
+                  if (ok) {
+                    // The panel now shows a picture from this boot, which is
+                    // what stops maybe_sleep from arming the provisioning
+                    // hand-off (and re-fetching) behind us.
+                    id(image_shown_this_boot) = true;
                     break;
+                  }
                   if (attempt == max_attempts) {
                     ESP_LOGE(FTAG, "Fetch failed %d times — leaving the current picture up", max_attempts);
                     break;
@@ -450,16 +497,27 @@ script:
                 }
             - lambda: id(epaper_display).sleep();
           else:
+            # No sleep decision is made here — maybe_sleep below owns it, and
+            # on an unprovisioned frame (or one whose Improv connection is
+            # still in flight) it deliberately stays awake instead.
             - logger.log:
-                format: "WiFi did not connect — going back to sleep"
+                format: "WiFi did not connect — skipping the fetch"
                 level: WARN
       - script.execute: maybe_sleep
 
   # Deep sleep guardrails. The frame must stay awake while it still needs a
-  # human: unprovisioned (no WiFi credentials in NVS), never adopted by Home
-  # Assistant, or deliberately pinned awake with the "Prevent Deep Sleep"
-  # switch. Once it has been adopted at least once it resumes the normal
-  # wake -> fetch -> sleep cycle even if HA is temporarily unreachable.
+  # human: unprovisioned (no WiFi credentials in NVS) or mid-provisioning,
+  # never adopted by Home Assistant, or deliberately pinned awake with the
+  # "Prevent Deep Sleep" switch. Once it has been adopted at least once it
+  # resumes the normal wake -> fetch -> sleep cycle even if HA is temporarily
+  # unreachable.
+  #
+  # Arming the provisioning hand-off happens FIRST and outside the sleep
+  # decision, because it is orthogonal to it: a frame held awake by the switch
+  # needs the hand-off just as much as one that would otherwise sleep (an
+  # unprovisioned frame booted into an OTA window used to take the switch
+  # branch and never arm anything, so provisioning it produced no image that
+  # boot either).
   #
   # There is deliberately no wake-button check here: `wakeup_pin_mode:
   # KEEP_AWAKE` already makes deep_sleep.enter defer while the button is still
@@ -469,6 +527,74 @@ script:
   # switch on (see on_boot), which is what the first branch below honours.
   - id: maybe_sleep
     then:
+      # Is this boot waiting on Improv provisioning for its picture? Two ways in:
+      #
+      #   - No credentials right now (has_sta() false). Either never
+      #     provisioned, or an Improv attempt just failed — improv_serial's 30 s
+      #     wifi-connect-timeout ends in clear_sta(). Arm regardless of whether
+      #     a picture was already fetched this boot: the frame is not going to
+      #     sleep in this state anyway (see the stay-awake check below), so the
+      #     hand-off is the only thing that will act on the user's next attempt.
+      #
+      #   - Credentials appeared *during* this boot and there is still no
+      #     picture. This is the case a plain has_sta() test got wrong:
+      #     improv_serial calls set_sta() before start_connecting(), so has_sta()
+      #     is already true for the whole 30 s attempt. Credentials submitted at
+      #     ~t=45 s whose connection completes after fetch_and_display's 60 s
+      #     WiFi wait used to look exactly like a normal provisioned frame — the
+      #     hand-off was never armed and the frame adopted and slept with a blank
+      #     panel until the next wake.
+      #
+      #     Both extra clauses are load-bearing here. `had_wifi_creds_at_boot`
+      #     keeps a *provisioned* frame whose AP is merely down (has_sta true,
+      #     never connects, fetch skipped) out of this branch, so it sleeps and
+      #     retries on the next wake instead of parking awake forever on
+      #     battery. `image_shown_this_boot` stops the fetch that the hand-off
+      #     itself triggers from re-arming the hand-off.
+      #
+      # Note both paths return true only when await_provisioning's own wait
+      # condition (connected AND has_sta) is false, so the script is guaranteed
+      # to park rather than run through on this stack — which is what makes
+      # provisioning_handoff_parked below truthful. Already connected with
+      # credentials and no picture just means the fetch failed; that is a server
+      # problem, not a provisioning one, and retry-on-next-wake is the answer.
+      #
+      # This runs first and outside the sleep decision on purpose: a frame held
+      # awake by "Prevent Deep Sleep" (an OTA window opened with the wake button)
+      # needs the hand-off just as much as one that would otherwise sleep.
+      - if:
+          condition:
+            and:
+              - lambda: |-
+                  if (!wifi::global_wifi_component->has_sta())
+                    return true;
+                  return !id(image_shown_this_boot) &&
+                         !id(had_wifi_creds_at_boot) &&
+                         !wifi::global_wifi_component->is_connected();
+              # Only arm what can actually be armed. A single-mode script drops
+              # the execute while it is running — including while it is running
+              # *this* action list, via await_provisioning -> fetch_and_display
+              # -> maybe_sleep — and claiming a parked hand-off that was never
+              # created would hold the frame awake forever with nothing left to
+              # fire. If it is genuinely parked, this is a no-op anyway.
+              - not:
+                  script.is_running: await_provisioning
+          then:
+            - logger.log:
+                format: "No picture yet and no WiFi credentials — waiting for Improv provisioning"
+                level: INFO
+            # Staying awake is only half the job: nothing else would ever
+            # run again once the user actually provisions. Improv's
+            # save_wifi_sta() connects without rebooting, and the only
+            # other entries into fetch_and_display are on_boot and the
+            # "Fetch Image Now" button — so without this hand-off the
+            # frame sits connected, adoptable, blank and awake until a
+            # human power-cycles it. await_provisioning restarts the
+            # normal fetch -> maybe_sleep flow when WiFi comes up.
+            - globals.set:
+                id: provisioning_handoff_parked
+                value: "true"
+            - script.execute: await_provisioning
       - if:
           condition:
             switch.is_on: prevent_deep_sleep
@@ -481,20 +607,20 @@ script:
           else:
             - if:
                 condition:
-                  lambda: return !wifi::global_wifi_component->has_sta();
+                  or:
+                    # No credentials at all: never sleep, a human is needed.
+                    - lambda: return !wifi::global_wifi_component->has_sta();
+                    # ...and never sleep out from under a parked hand-off,
+                    # which deep_sleep.enter would kill along with the chip.
+                    # Strictly "parked", not "armed at some point this boot":
+                    # once it has fired, a frame that still has no picture is
+                    # in the ordinary failed-fetch case and should sleep and
+                    # retry on the next wake, not sit awake forever.
+                    - lambda: return id(provisioning_handoff_parked);
                 then:
                   - logger.log:
-                      format: "No WiFi credentials — staying awake for Improv provisioning"
+                      format: "Waiting for WiFi provisioning — staying awake"
                       level: INFO
-                  # Staying awake is only half the job: nothing else would ever
-                  # run again once the user actually provisions. Improv's
-                  # save_wifi_sta() connects without rebooting, and the only
-                  # other entries into fetch_and_display are on_boot and the
-                  # "Fetch Image Now" button — so without this hand-off the
-                  # frame sits connected, adoptable, blank and awake until a
-                  # human power-cycles it. await_provisioning restarts the
-                  # normal fetch -> maybe_sleep flow when WiFi comes up.
-                  - script.execute: await_provisioning
                 else:
                   - if:
                       condition:
@@ -516,13 +642,16 @@ script:
                         - wait_until:
                             condition:
                               lambda: return id(api_connected_this_boot);
-                        # Re-check the switch: adoption may have taken minutes,
-                        # and Home Assistant may have turned it on meanwhile.
+                        # Re-check the switch, and only the switch: adoption may
+                        # have taken minutes and Home Assistant may have turned
+                        # it on meanwhile. (has_been_adopted is not re-checked
+                        # because it cannot be false here — the wait above only
+                        # completes once api_connected_this_boot is true, and
+                        # api.on_client_connected sets both globals in the same
+                        # synchronous action list.)
                         - if:
                             condition:
-                              and:
-                                - lambda: return id(has_been_adopted);
-                                - switch.is_off: prevent_deep_sleep
+                              switch.is_off: prevent_deep_sleep
                             then:
                               - logger.log:
                                   format: "Adopted — entering deep sleep..."
@@ -546,9 +675,9 @@ script:
                               if (!(m >= 1.0f)) m = ${default_sleep_minutes};
                               return (uint32_t) (m * 60000.0f);
 
-  # The second half of maybe_sleep's "no WiFi credentials" branch: pick the
-  # normal wake -> fetch -> sleep cycle back up the moment provisioning
-  # succeeds, instead of leaving a freshly provisioned frame awake and blank.
+  # The second half of maybe_sleep's provisioning check: pick the normal
+  # wake -> fetch -> sleep cycle back up the moment provisioning succeeds,
+  # instead of leaving a freshly provisioned frame awake and blank.
   #
   # Why this is its own script and not a wait_until appended to that branch:
   # ESPHome actions run inline. `script.execute` plays the target script on the
@@ -563,9 +692,12 @@ script:
   # there), maybe_sleep unwinds and finishes, and the fetch that resumes minutes
   # later runs on a clean stack.
   #
-  # Single mode is the loop guard: while parked, further executes are dropped,
-  # and after it has fired only another credential-less maybe_sleep can re-arm
-  # it. A WiFi drop later cannot re-trigger a fetch.
+  # Single mode is the loop guard: while parked, further executes are dropped
+  # (and maybe_sleep does not even try — it checks is_running before arming, so
+  # it never records a park it did not create). Once it has fired, only another
+  # maybe_sleep that finds the frame waiting on provisioning again can re-arm
+  # it, and the fetch it just ran clears the "no picture this boot" clause on
+  # success — so a WiFi drop later cannot spin this into a fetch loop.
   - id: await_provisioning
     then:
       # Untimed: the frame has nothing else to do until a human provisions it,
@@ -584,15 +716,23 @@ script:
       #     `if (this->has_sta())`. So a connection that comes up *after*
       #     improv's 30 s timeout leaves the frame connected with nothing in
       #     NVS. Firing there would fetch once and then strand the frame again:
-      #     fetch_and_display's tail maybe_sleep would take the no-credentials
-      #     branch and its `script.execute: await_provisioning` would be dropped
-      #     — this script is still on the stack, exactly the trap described
-      #     above. Waiting for both keeps us parked for the user's retry.
+      #     fetch_and_display's tail maybe_sleep would want to re-arm this
+      #     script and could not — it is still on the stack, exactly the trap
+      #     described above — so the frame would end the boot with no hand-off
+      #     parked and no way back. Waiting for both keeps us parked for the
+      #     user's retry instead.
       - wait_until:
           condition:
             lambda: |-
               return wifi::global_wifi_component->is_connected() &&
                      wifi::global_wifi_component->has_sta();
+      # No longer parked: from here on this script is running on its own two
+      # feet and a deep sleep would not be cutting a wait short. Cleared before
+      # the delay below so the maybe_sleep at the end of the fetch sees the
+      # truth (see that flag's definition for why is_running() cannot be used).
+      - globals.set:
+          id: provisioning_handoff_parked
+          value: "false"
       # Let improv_serial's loop see the connection first. It is what saves the
       # credentials to NVS, cancels its 30 s "wifi-connect-timeout" (whose
       # handler calls clear_sta()) and answers the web installer, and it only
