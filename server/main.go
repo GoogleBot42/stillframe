@@ -357,6 +357,12 @@ func fetchImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The client is gone; don't burn a conversion slot on a picture nobody will
+	// read.
+	if err := r.Context().Err(); err != nil {
+		return
+	}
+
 	// Now you can access the fields of imageProps, e.g.:
 	fmt.Printf("Received request for an image with width: %d, height: %d\n", imageProps.Width, imageProps.Height)
 	for _, color := range imageProps.ColorSpace {
@@ -372,7 +378,7 @@ func fetchImage(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Serving random image file:", randomImgFile)
 
 	flippedImage := flipImage(img, imageProps.FlipVertical, imageProps.FlipHorizonal)
-	bestCrop := GetBestPieceOfImage(r.Context(), imageProps.Width, imageProps.Height, flippedImage)
+	bestCrop := GetBestPieceOfImage(imageProps.Width, imageProps.Height, flippedImage)
 	data := ConvertToEInkImage(bestCrop, imageProps.ColorSpace)
 
 	fmt.Printf("Bytes to send: %+v\n", len(data))

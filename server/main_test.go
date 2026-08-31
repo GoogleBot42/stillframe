@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -492,7 +491,6 @@ func TestFetchImageEndToEnd(t *testing.T) {
 	imgDir := t.TempDir()
 	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 64, 48)
 
 	const w, h = 16, 8
 	rec := postJSON(t, "/fetchImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
@@ -525,7 +523,6 @@ func TestFetchImageEndToEndJPEG(t *testing.T) {
 	imgDir := t.TempDir()
 	writeTempJPEG(t, imgDir, "only.jpg", gradientRGBA(64, 48))
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 64, 48)
 
 	const w, h = 16, 8
 	rec := postJSON(t, "/fetchImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
@@ -578,7 +575,6 @@ func TestFetchImageEndToEndOffsetFrameGIF(t *testing.T) {
 	}
 
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 64, 48) // full frame, in temp-PNG space
 
 	const w, h = 16, 8
 	rec := postJSON(t, "/fetchImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
@@ -595,7 +591,6 @@ func TestFetchImageIsDeterministicForAGivenImage(t *testing.T) {
 	imgDir := t.TempDir()
 	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 64, 48)
 
 	props := ImageProperties{Width: 16, Height: 8, ColorSpace: epd7in3fPalette}
 	first := postJSON(t, "/fetchImage", props).Body.String()
@@ -618,7 +613,6 @@ func TestFetchImageHonoursFlips(t *testing.T) {
 	}
 	writeTempPNG(t, imgDir, "only.png", src)
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 64, 48)
 
 	props := ImageProperties{Width: 16, Height: 8, ColorSpace: bwPalette}
 	normal := postJSON(t, "/fetchImage", props).Body.Bytes()
@@ -652,7 +646,6 @@ func TestFetchImageHonoursHorizontalFlip(t *testing.T) {
 	}
 	writeTempPNG(t, imgDir, "only.png", src)
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 64, 48)
 
 	props := ImageProperties{Width: 16, Height: 8, ColorSpace: bwPalette}
 	normal := postJSON(t, "/fetchImage", props).Body.Bytes()
@@ -667,17 +660,13 @@ func TestFetchImageHonoursHorizontalFlip(t *testing.T) {
 	}
 }
 
-// A broken or missing cropper must not cost the frame its picture: the crop
+// A picture with no face in it must not cost the frame its picture: the crop
 // falls back to a centered one and the response is a normal, full-length image.
-func TestFetchImageWithoutSmartcropStillServesAnImage(t *testing.T) {
+func TestFetchImageWithoutFacesStillServesAnImage(t *testing.T) {
 	silenceStdout(t)
 	imgDir := t.TempDir()
 	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
 	withImageDir(t, imgDir)
-	t.Setenv("PATH", t.TempDir())
-	if _, err := exec.LookPath("smartcrop-cli"); err == nil {
-		t.Skip("smartcrop-cli is still resolvable")
-	}
 
 	const w, h = 16, 8
 	rec := postJSON(t, "/fetchImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
@@ -704,7 +693,6 @@ func TestFetchImageNonImageFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 8, 8)
 
 	rec := postJSON(t, "/fetchImage", ImageProperties{Width: 16, Height: 8, ColorSpace: epd7in3fPalette})
 	if rec.Code != http.StatusInternalServerError {
@@ -744,7 +732,6 @@ func TestFetchImageRetriesPastUndecodableFiles(t *testing.T) {
 	}
 	good := writeTempPNG(t, imgDir, "good.png", gradientRGBA(64, 48))
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 64, 48)
 
 	const w, h = 16, 8
 	for i := 0; i < 10; i++ {
@@ -769,7 +756,6 @@ func TestFetchImageAllCandidatesUndecodable(t *testing.T) {
 		}
 	}
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 8, 8)
 
 	rec := postJSON(t, "/fetchImage", ImageProperties{Width: 16, Height: 8, ColorSpace: epd7in3fPalette})
 	if rec.Code != http.StatusInternalServerError {
@@ -794,7 +780,6 @@ func TestFetchImageIgnoresUndecodableExtensions(t *testing.T) {
 		}
 	}
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 64, 48)
 
 	const w, h = 16, 8
 	for i := 0; i < 20; i++ {
@@ -817,7 +802,6 @@ func TestFetchImageDoesNotRepeatTheSameImageBackToBack(t *testing.T) {
 	writeTempPNG(t, imgDir, "white.png", solidRGBA(64, 48, color.RGBA{255, 255, 255, 255}))
 	writeTempPNG(t, imgDir, "black.png", solidRGBA(64, 48, color.RGBA{0, 0, 0, 255}))
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 64, 48)
 
 	props := ImageProperties{Width: 16, Height: 8, ColorSpace: bwPalette}
 	seen := map[string]bool{}
@@ -851,7 +835,6 @@ func TestFetchImageIgnoresSubdirectories(t *testing.T) {
 		}
 	}
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 64, 48)
 
 	const w, h = 16, 8
 	for i := 0; i < 20; i++ {
@@ -1126,7 +1109,6 @@ func TestFetchImageFallsPastACorruptPreferredFile(t *testing.T) {
 		writeTempPNG(t, imgDir, fmt.Sprintf("export%d", i), gradientRGBA(64, 48))
 	}
 	withImageDir(t, imgDir)
-	stubSmartcrop(t, 0, 0, 64, 48)
 
 	const w, h = 16, 8
 	for i := 0; i < 10; i++ {

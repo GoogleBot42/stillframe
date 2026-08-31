@@ -7,7 +7,7 @@ goes back to deep sleep.
 Two halves:
 
 - **`server/`** — a Go HTTP server that picks a random image from a directory
-  and converts it for a specific e-ink panel: smart crop → Lanczos3 resize →
+  and converts it for a specific e-ink panel: face-aware crop → Lanczos3 resize →
   gamma correction → CIEDE2000 nearest-color mapping → Floyd–Steinberg
   dithering → 4-bit packing. The device describes its own capabilities
   (dimensions, color space, flips) in the request, so one server drives every

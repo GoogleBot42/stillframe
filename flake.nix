@@ -27,7 +27,7 @@
       in
       {
         packages = with pkgs.stillframe; {
-          inherit server smartcrop;
+          inherit server;
           default = server;
         };
         devShells.default = pkgs.callPackage ./shell.nix { };
