@@ -8,7 +8,16 @@
 final: prev:
 let
   packages = {
-    inherit (final.callPackage ./server { }) server smartcrop;
+    inherit (final.callPackage ./server { }) server;
+
+    # `smartcrop` used to be the Python crop helper the server shelled out to.
+    # The aliases below exist for downstream flakes this repo cannot see, and
+    # for those a missing attribute is an unexplained eval failure — so leave a
+    # stub that says what happened. Nix is lazy, so it costs nothing until
+    # somebody actually asks for it. (Deliberately not re-exported from
+    # flake.nix's `packages`: that output is forced by `nix flake show` and
+    # `nix flake check`, which would turn this into a hard failure for us.)
+    smartcrop = throw "stillframe: the smartcrop package was removed; the cropper is now in-process in the server binary";
   };
 in
 {

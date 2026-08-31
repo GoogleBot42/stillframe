@@ -1,156 +1,417 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
+	_ "embed"
 	"image"
-	"image/png"
-	"io/ioutil"
 	"log"
-	"os"
-	"os/exec"
-	"strconv"
-	"strings"
-	"time"
+	"sort"
+	"sync"
 
+	pigo "github.com/esimov/pigo/core"
 	"github.com/nfnt/resize"
 )
 
-// smartcropTimeout bounds a single smartcrop-cli run. Smart cropping a large
-// photo on a slow SBC can legitimately take several seconds, so this is
-// deliberately generous; past it the interpreter is wedged (PIL on a truncated
-// file, a stalled network mount) and waiting forever would pin the handler
-// goroutine, keep the full-size temp PNG on disk, and strand another Python
-// process on every wake until the box runs out of memory or disk.
-const smartcropTimeout = 30 * time.Second
+// cascadeBytes is pigo's face-detection cascade, embedded so the cropper has no
+// runtime file or network dependency (see cascade/README.md for provenance).
+//
+//go:embed cascade/facefinder
+var cascadeBytes []byte
 
-// waitDelay bounds how long the pipe copy may outlive the killed child.
-const waitDelay = 5 * time.Second
+const (
+	// analysisMaxSide is the longest side detection runs at. A ~1000 px working
+	// copy still resolves a face down to a small fraction of the frame (see
+	// minFaceSize) while keeping the cascade sweep - which is quadratic in
+	// pixels - to a few tens of milliseconds on a 12 MP original.
+	analysisMaxSide = 1000
 
-// stderrTail caps how much of a failed subprocess's output reaches the log.
-const stderrTail = 2048
+	// minFaceSize is the smallest detection window, in downscaled pixels, and
+	// therefore the smallest face this can find: with analysisMaxSide at 1000,
+	// roughly 2% of the long side. It is pigo's own example value and it is
+	// deliberately not scaled to the image - deriving it from the image's
+	// dimensions instead made the detector blind to anyone not filling the
+	// frame, which is exactly the group photo the crop most needs to get right.
+	// Smaller than this the cascade mostly reports noise, and the sweep gets
+	// expensive fast (window count grows as 1/size^2).
+	minFaceSize = 20
 
-// Writes the file as a PNG to a temporary file for the purpose of processing the image using another program
-func ProcessFindingCrop(ctx context.Context, img image.Image, width, height int, processFunc func(context.Context, string, int, int) (image.Rectangle, error)) (image.Rectangle, error) {
-	// Encoding a 12 MP PNG is the expensive half of this function, so do not
-	// start it for a request that has already gone away.
-	if err := ctx.Err(); err != nil {
-		return image.Rectangle{}, fmt.Errorf("crop abandoned: %w", err)
-	}
+	// minFaceQuality is the score a cluster must beat. Note ClusterDetections
+	// *sums* the scores of the windows it merged rather than averaging them, so
+	// this is not a normalised confidence and it grows with the face's size in
+	// the frame - it is a floor on "several windows agreed", not on "the
+	// classifier was 5.0 sure". 5.0 is pigo's own example value; lower lets
+	// background texture through, and a false face drags the crop somewhere
+	// nobody asked for.
+	minFaceQuality = 5.0
 
-	// Create a temporary directory
-	tmpDir, err := ioutil.TempDir("", "image_processing")
-	if err != nil {
-		return image.Rectangle{}, fmt.Errorf("creating temp dir: %w", err)
-	}
-	// Clean up the temp file and directory on every exit path, not just success.
-	defer os.RemoveAll(tmpDir)
+	// dupCentreFraction is how close two detection centres have to be, as a
+	// fraction of the larger box's side, before the later one is treated as a
+	// re-detection of the same face rather than a second person. See
+	// duplicateDetection.
+	dupCentreFraction = 0.3
 
-	// Create a temporary file within our temp-directory that follows a particular naming pattern
-	tmpFile, err := ioutil.TempFile(tmpDir, "image-*.png")
-	if err != nil {
-		return image.Rectangle{}, fmt.Errorf("creating temp file: %w", err)
-	}
-	defer tmpFile.Close()
+	shiftFactor = 0.1
+	scaleFactor = 1.1
+	iouThresh   = 0.2
+)
 
-	// Use png.Encode to encode img to the PNG format with tmpFile as the target
-	// writer. Convert to RGBA first: the png encoder writes color models it does
-	// not recognise — like the *image.YCbCr a JPEG decodes to — at 16 bits per
-	// channel through a per-pixel conversion, which more than triples the encode
-	// time at 12 MP. (imageToRGBA is a no-op for *image.RGBA input.)
-	if err := png.Encode(tmpFile, imageToRGBA(img)); err != nil {
-		return image.Rectangle{}, fmt.Errorf("encoding image: %w", err)
-	}
+var (
+	classifierOnce sync.Once
+	classifier     *pigo.Pigo
+)
 
-	// Close the file so the child process sees a complete PNG
-	if err := tmpFile.Close(); err != nil {
-		return image.Rectangle{}, fmt.Errorf("closing temp file: %w", err)
-	}
-
-	// Run the process function
-	res, err := processFunc(ctx, tmpFile.Name(), width, height)
-	if err != nil {
-		return image.Rectangle{}, fmt.Errorf("processing image: %w", err)
-	}
-
-	// The temp PNG's coordinate space starts at (0,0), but img's own bounds may
-	// not (a GIF's first frame can be anchored at its frame offset, and a
-	// sub-image keeps its parent's coordinates). Translate the result into img's
-	// space so SubImage(res) selects the region the cropper actually chose.
-	return res.Add(img.Bounds().Min), nil
-}
-
-type PythonResult struct {
-	X      int `json:"x"`
-	Y      int `json:"y"`
-	Width  int `json:"width"`
-	Height int `json:"height"`
-}
-
-// Go's smartcrop selects terrible crops.  Of my test images it never selected the face.
-// But the python smartcrop works great.  So save to a file and execute the python one instead.
-func pythonSmartcrop(ctx context.Context, filename string, width, height int) (image.Rectangle, error) {
-	ctx, cancel := context.WithTimeout(ctx, smartcropTimeout)
-	defer cancel()
-
-	started := time.Now()
-	cmd := exec.CommandContext(ctx, "smartcrop-cli", filename, strconv.Itoa(width), strconv.Itoa(height))
-	// Killing the child is not enough on its own: Output() also waits for the
-	// stdout pipe to close, and any grandchild still holding it would keep the
-	// handler blocked long past the deadline. Give the copy a hard stop too.
-	cmd.WaitDelay = waitDelay
-
-	output, err := cmd.Output()
-	if err != nil {
-		// The child's own diagnostics are the only thing that explains the
-		// failure; without them the log reads "exit status 1" while every
-		// image silently center-crops.
-		detail := stderrDetail(err)
-		switch {
-		case errors.Is(ctx.Err(), context.DeadlineExceeded):
-			return image.Rectangle{}, fmt.Errorf("running python script: timed out after %s (%w)%s", time.Since(started).Round(time.Millisecond), ctx.Err(), detail)
-		case errors.Is(ctx.Err(), context.Canceled):
-			return image.Rectangle{}, fmt.Errorf("running python script: canceled after %s (%w)%s", time.Since(started).Round(time.Millisecond), ctx.Err(), detail)
+// faceClassifier parses the embedded cascade once. A parse error is impossible
+// unless the embedded file is corrupt, so it is logged once and then treated as
+// "no detector": every crop degrades to a centered one. A broken cropper must
+// never stop the frame from getting a picture.
+func faceClassifier() *pigo.Pigo {
+	classifierOnce.Do(func() {
+		pg, err := pigo.NewPigo().Unpack(cascadeBytes)
+		if err != nil {
+			log.Printf("warning: face cascade is unusable (%v); every crop will be centered", err)
+			return
 		}
-		return image.Rectangle{}, fmt.Errorf("running python script: %w%s", err, detail)
-	}
-
-	var result PythonResult
-	err = json.Unmarshal(output, &result)
-	if err != nil {
-		// Quote what could not be parsed - a cropper that prints a warning
-		// before its JSON exits 0, so stderrDetail never sees it.
-		return image.Rectangle{}, fmt.Errorf("parsing output %q: %w", truncate(string(output)), err)
-	}
-
-	rect := image.Rect(result.X, result.Y, result.X+result.Width, result.Y+result.Height)
-	return rect, nil
+		classifier = pg
+	})
+	return classifier
 }
 
-// stderrDetail renders the stderr an *exec.ExitError carries as a log suffix,
-// or "" when there is nothing to show.
-func stderrDetail(err error) string {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		return ""
+// grayDownscale converts img to the 8-bit grayscale plane pigo wants, sampling
+// with an integer stride so the longer side is at most analysisMaxSide. This is
+// analysis input, not output: nearest-neighbour costs one read per kept pixel
+// and does not move a face by enough to matter, whereas a Lanczos pass over a
+// 12 MP original would cost more than the detection itself.
+//
+// A whole-number stride means the analysis resolution falls in steps, not
+// smoothly: a 2000 px source keeps a 1000 px plane at stride 2, and one pixel
+// more drops it to 667 at stride 3, so the smallest face this can find (see
+// minFaceSize) jumps by half again at each cliff. That is accepted rather than
+// fixed - smoothing it needs a box filter that reads every source pixel, which
+// costs more than the detection the downscale exists to make affordable, and
+// the step only shifts the minimum face size between "small" and "slightly
+// less small".
+//
+// It returns the plane, its dimensions, and the stride, so detections can be
+// mapped back to full-image coordinates.
+func grayDownscale(img image.Image) (pixels []uint8, rows, cols, stride int) {
+	b := img.Bounds()
+	srcW, srcH := b.Dx(), b.Dy()
+	if srcW <= 0 || srcH <= 0 {
+		return nil, 0, 0, 1
 	}
-	msg := truncate(strings.TrimSpace(string(exitErr.Stderr)))
-	if msg == "" {
-		return ""
+
+	longer := srcW
+	if srcH > longer {
+		longer = srcH
 	}
-	return ": " + msg
+	stride = (longer + analysisMaxSide - 1) / analysisMaxSide
+	if stride < 1 {
+		stride = 1
+	}
+
+	cols = (srcW + stride - 1) / stride
+	rows = (srcH + stride - 1) / stride
+	pixels = make([]uint8, rows*cols)
+
+	i := 0
+	for y := 0; y < rows; y++ {
+		sy := b.Min.Y + y*stride
+		for x := 0; x < cols; x++ {
+			sx := b.Min.X + x*stride
+			r, g, bb, _ := img.At(sx, sy).RGBA()
+			// Rec. 601 luma on the 16-bit values image/color hands back,
+			// shifted back down to 8 bits.
+			pixels[i] = uint8((299*r + 587*g + 114*bb) / 1000 >> 8)
+			i++
+		}
+	}
+	return pixels, rows, cols, stride
 }
 
-// truncate keeps the last stderrTail bytes of a subprocess's output. The tail,
-// because a Python traceback ends with the exception. The cut can land
-// mid-rune, so scrub what it breaks rather than logging invalid UTF-8.
-func truncate(s string) string {
-	if len(s) <= stderrTail {
-		return s
+// detectFaces returns the faces found in img, as rectangles in img's own
+// coordinate space (which need not start at the origin: a GIF frame or a
+// SubImage keeps its parent's coordinates).
+func detectFaces(img image.Image) []image.Rectangle {
+	pg := faceClassifier()
+	if pg == nil {
+		return nil
 	}
-	return "..." + strings.ToValidUTF8(s[len(s)-stderrTail:], "")
+
+	pixels, rows, cols, stride := grayDownscale(img)
+	if rows == 0 || cols == 0 {
+		return nil
+	}
+
+	// MaxSize comes off the *shorter* side: pigo's detection window is square
+	// and has to fit, since it scans rows in [scale/2+1, rows-scale/2-1], so a
+	// window wider than the short side runs zero iterations. The same is why
+	// the guard below tests the short side - a panorama has plenty of pixels
+	// and no room at all.
+	shorter := cols
+	if rows < shorter {
+		shorter = rows
+	}
+	minSize := minFaceSize
+	if minSize+2 > shorter {
+		// A thumbnail with no room for the smallest window pigo would scan.
+		return nil
+	}
+
+	dets := pg.RunCascade(pigo.CascadeParams{
+		MinSize:     minSize,
+		MaxSize:     shorter,
+		ShiftFactor: shiftFactor,
+		ScaleFactor: scaleFactor,
+		ImageParams: pigo.ImageParams{
+			Pixels: pixels,
+			Rows:   rows,
+			Cols:   cols,
+			Dim:    cols,
+		},
+	}, 0.0)
+	dets = pg.ClusterDetections(dets, iouThresh)
+
+	// Highest score first, so the dedup below keeps the best-scoring version of
+	// a face. ClusterDetections under-merges - it routinely answers a single
+	// face with two or three near-concentric clusters at different scales - and
+	// cropAroundFaces takes the union of what it is given, so the duplicates
+	// would quietly widen the crop and the log line would triple-count.
+	sort.Slice(dets, func(i, j int) bool { return dets[i].Q > dets[j].Q })
+
+	origin := img.Bounds().Min
+	var faces []image.Rectangle
+	for _, d := range dets {
+		if d.Q <= minFaceQuality {
+			continue
+		}
+		// A detection is a circle: (Col, Row) centre, Scale diameter. Take the
+		// bounding square, in downscaled pixels, and scale it back up.
+		half := d.Scale / 2
+		r := image.Rect(
+			origin.X+(d.Col-half)*stride,
+			origin.Y+(d.Row-half)*stride,
+			origin.X+(d.Col+half)*stride,
+			origin.Y+(d.Row+half)*stride,
+		)
+		if duplicateDetection(faces, r) {
+			continue
+		}
+		faces = append(faces, r)
+	}
+	return faces
+}
+
+// duplicateDetection reports whether r is another detection of a face already
+// kept, judged by how far apart the two centres are: closer than
+// dupCentreFraction of the larger box's side and it is the same face.
+//
+// The distance is what separates the two cases. ClusterDetections under-merges
+// and answers one face with two or three boxes at different scales, but those
+// are near-*concentric* - their centres sit almost on top of each other. Two
+// real faces are at least a face-width apart even cheek to cheek, and pigo's box
+// runs about twice the tight face, so a third of a box is a tight margin for a
+// re-detection and a wide one for two people.
+//
+// Asking instead whether a centre falls inside the other box - the obvious test,
+// and what this used to do - throws away real people: because the box is about
+// twice the face, a parent's box swallows the centre of the baby they are
+// holding and the baby is dropped from the crop entirely.
+func duplicateDetection(faces []image.Rectangle, r image.Rectangle) bool {
+	rc := centreOf(r)
+	for _, f := range faces {
+		fc := centreOf(f)
+		// The boxes are squares, so either side is "the" side. Measure against
+		// the larger of the pair: the spurious re-detections are often a small
+		// fraction of the face they sit on (an eye, a mouth), and scaling the
+		// threshold to *those* would leave it at a handful of pixels and let
+		// every one of them through.
+		side := f.Dx()
+		if r.Dx() > side {
+			side = r.Dx()
+		}
+		// Chebyshev distance: the detections a cluster leaves behind are offset
+		// on both axes at once, and the max of the two is the honest measure of
+		// "the same place".
+		dist := absInt(rc.X - fc.X)
+		if dy := absInt(rc.Y - fc.Y); dy > dist {
+			dist = dy
+		}
+		if float64(dist) < dupCentreFraction*float64(side) {
+			return true
+		}
+	}
+	return false
+}
+
+func centreOf(r image.Rectangle) image.Point {
+	return image.Pt((r.Min.X+r.Max.X)/2, (r.Min.Y+r.Max.Y)/2)
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// cropAroundFaces positions the crop over the faces. It only ever chooses
+// *where* the window sits: the returned rectangle is always exactly the size
+// centerCrop would have returned for the same bounds and ratio, never smaller.
+// Zooming in on a face would throw away resolution and, after the exact-size
+// resize, show less picture than the panel can hold - the panel must always be
+// filled by the largest crop of its aspect ratio that the photo allows.
+//
+// Within that fixed size the window is placed to show as much face as possible:
+// it maximises the face area it covers, each face weighted by its size, and
+// among the placements that tie it takes the one nearest the faces' centre.
+// That tie-break is what keeps the ordinary case ordinary - when every face fits
+// in one window, centring on them covers all of it and wins - while the
+// maximisation is what handles a group too wide for the window: a panorama with
+// somebody at each end gets one of them whole rather than the empty middle
+// ground between them, which is what centring on the span alone returns.
+//
+// With no faces the answer is exactly centerCrop, which is also the whole
+// fallback story.
+//
+// It is deliberately pure: no detection, no image, so the placement rules are
+// testable on their own.
+func cropAroundFaces(bounds image.Rectangle, faces []image.Rectangle, width, height int) image.Rectangle {
+	crop := centerCrop(bounds, width, height)
+	if len(faces) == 0 || crop.Empty() {
+		return crop
+	}
+
+	// The faces are only interesting where they overlap the image; a detection
+	// clipped by the frame edge would otherwise drag the crop off the picture.
+	// (Intersect answers the canonical empty rectangle and Union with an empty
+	// rectangle is the identity, so no special-casing is needed here.)
+	var union image.Rectangle
+	clipped := make([]image.Rectangle, 0, len(faces))
+	for _, f := range faces {
+		f = f.Intersect(bounds)
+		if f.Empty() {
+			continue
+		}
+		clipped = append(clipped, f)
+		union = union.Union(f)
+	}
+	if union.Empty() {
+		return crop
+	}
+
+	// Placement is one-dimensional. centerCrop's window spans the whole image on
+	// at least one axis, so at most one axis has any freedom left; the other
+	// resolves to bounds.Min either way, through the size >= span shortcut in
+	// placeWindow.
+	x := placeWindow(bounds.Min.X, bounds.Max.X, crop.Dx(), union.Min.X, union.Max.X, clipped, xAxis)
+	y := placeWindow(bounds.Min.Y, bounds.Max.Y, crop.Dy(), union.Min.Y, union.Max.Y, clipped, yAxis)
+
+	return image.Rect(x, y, x+crop.Dx(), y+crop.Dy())
+}
+
+// The axis placeWindow projects the faces onto.
+type axis int
+
+const (
+	xAxis axis = iota
+	yAxis
+)
+
+// span projects r onto the axis.
+func (a axis) span(r image.Rectangle) (min, max int) {
+	if a == xAxis {
+		return r.Min.X, r.Max.X
+	}
+	return r.Min.Y, r.Max.Y
+}
+
+// placeWindow chooses the offset of a window of the given size inside
+// [boundsMin, boundsMax) that covers the most face.
+//
+// Each face is projected onto the axis and scored by the fraction of that
+// interval the window covers, weighted by the face's area so that the big face
+// in the foreground outranks a small one in the background. The total is
+// piecewise linear in the offset - every face contributes a ramp that starts
+// when the window's trailing edge reaches it and flattens once it is fully
+// inside - so the maximum is always at a breakpoint. Those are the four offsets
+// per face at which the window's edges meet the face's, plus the ends of the
+// legal range, plus the union-centred offset, which is included so that it can
+// win the tie whenever it is optimal.
+//
+// Ties go to the candidate nearest the union-centred offset, then to the lowest
+// offset, so the answer never depends on the order the detector reported faces.
+func placeWindow(boundsMin, boundsMax, size, unionMin, unionMax int, faces []image.Rectangle, a axis) int {
+	if size >= boundsMax-boundsMin {
+		// No freedom on this axis: the window is the whole image.
+		return boundsMin
+	}
+
+	clamp := func(v int) int {
+		if v > boundsMax-size {
+			v = boundsMax - size
+		}
+		if v < boundsMin {
+			v = boundsMin
+		}
+		return v
+	}
+
+	// The old behaviour, and still the preferred answer whenever nothing beats
+	// it: the window centred on the middle of the faces.
+	centred := clamp((unionMin+unionMax)/2 - size/2)
+
+	best, bestScore := centred, coveredFaceArea(centred, size, faces, a)
+	consider := func(v int) {
+		v = clamp(v)
+		score := coveredFaceArea(v, size, faces, a)
+		switch {
+		case score > bestScore:
+		case score < bestScore:
+			return
+		default:
+			// Equal coverage: prefer the placement closer to the faces' centre,
+			// and the leftmost/topmost of those.
+			d, bd := absInt(v-centred), absInt(best-centred)
+			if d > bd || (d == bd && v >= best) {
+				return
+			}
+		}
+		best, bestScore = v, score
+	}
+
+	consider(boundsMin)
+	consider(boundsMax - size)
+	for _, f := range faces {
+		min, max := a.span(f)
+		consider(min - size) // window ends where the face begins
+		consider(max - size) // window ends where the face ends
+		consider(min)        // window begins where the face begins
+		consider(max)        // window begins where the face ends
+	}
+	return best
+}
+
+// coveredFaceArea is how much face area a window of [offset, offset+size) on
+// the given axis shows: for each face, its area times the fraction of its
+// projection the window covers.
+func coveredFaceArea(offset, size int, faces []image.Rectangle, a axis) float64 {
+	end := offset + size
+	total := 0.0
+	for _, f := range faces {
+		min, max := a.span(f)
+		lo, hi := min, max
+		if lo < offset {
+			lo = offset
+		}
+		if hi > end {
+			hi = end
+		}
+		if hi <= lo {
+			continue
+		}
+		area := float64(f.Dx()) * float64(f.Dy())
+		total += area * float64(hi-lo) / float64(max-min)
+	}
+	return total
 }
 
 // centerCrop returns the largest centered sub-rectangle of bounds that has the
@@ -194,21 +455,24 @@ func snapToAspect(r, bounds image.Rectangle, width, height int) image.Rectangle 
 	return centerCrop(r, width, height)
 }
 
-func GetBestPieceOfImage(ctx context.Context, width, height int, img image.Image) image.Image {
-	// analyzer := smartcrop.NewAnalyzer(nfnt.NewDefaultResizer())
-	// bestCrop, _ := analyzer.FindBestCrop(img, 800, 480)
+func GetBestPieceOfImage(width, height int, img image.Image) image.Image {
+	bounds := img.Bounds()
 
-	fmt.Println("Finding best image crop...")
-
-	bestCrop, err := ProcessFindingCrop(ctx, img, width, height, pythonSmartcrop)
-	if err != nil {
-		log.Printf("warning: smart crop failed (%v); falling back to a centered crop", err)
-		bestCrop = img.Bounds()
+	bestCrop := centerCrop(bounds, width, height)
+	if bestCrop == bounds {
+		// The photo already has the panel's aspect ratio, so the window is the
+		// whole image and there is no placement left to decide. Running the
+		// cascade anyway would cost tens of milliseconds per request to learn
+		// nothing - and every 4:3 photo on a 4:3 panel takes this path.
+		log.Printf("crop: the crop is the whole image %v; skipping face detection", bestCrop)
+	} else if faces := detectFaces(img); len(faces) > 0 {
+		bestCrop = cropAroundFaces(bounds, faces, width, height)
+		log.Printf("crop: %d face(s) found; crop %v", len(faces), bestCrop)
+	} else {
+		log.Printf("crop: no faces found; centered crop %v", bestCrop)
 	}
 
-	bestCrop = snapToAspect(bestCrop, img.Bounds(), width, height)
-
-	fmt.Printf("Best crop: %+v\n", bestCrop)
+	bestCrop = snapToAspect(bestCrop, bounds, width, height)
 
 	type SubImager interface {
 		SubImage(r image.Rectangle) image.Image

@@ -55,7 +55,7 @@ bash esphome/tests/run.sh
 
 1. ESP32 firmware POSTs JSON to server describing display capabilities (dimensions, color space, flip settings)
 2. Server selects a random image from its configured directory
-3. Server pipeline: smart crop (Python subprocess) → Lanczos3 resize → gamma correction → CIEDE2000 nearest-color mapping → Floyd-Steinberg dithering → nibble packing (2 pixels/byte)
+3. Server pipeline: face-aware crop (in-process, pigo) → Lanczos3 resize → gamma correction → CIEDE2000 nearest-color mapping → Floyd-Steinberg dithering → nibble packing (2 pixels/byte)
 4. Server returns raw binary image data
 5. Firmware writes to e-ink display via SPI, then enters deep sleep
 
@@ -67,7 +67,7 @@ Key files:
 - `main.go` — HTTP server, routing, CLI args (port, image directory)
 - `image.go` — Image decoding (PNG/JPEG/GIF), RGBA conversion, gamma correction
 - `einkimage.go` — Color space mapping, CIEDE2000 dithering, nibble packing
-- `bestcrop.go` — Smart crop via Python subprocess (`smartcrop-cli`)
+- `bestcrop.go` — Crop selection: pure-Go face detection ([pigo](https://github.com/esimov/pigo), cascade embedded from `server/cascade/facefinder` with `//go:embed`) positions the crop over the faces; with no faces found it is a plain center crop, which is also the fallback whenever detection cannot run. No subprocess, no temp files, no Python
 - `service.nix` — NixOS systemd service module `services.stillframe-server` (configurable port, imgDir, user/group)
 - `service-test.nix` — NixOS VM test that verifies the service starts
 
@@ -122,9 +122,9 @@ HA entities: "Prevent Deep Sleep" switch, "Sleep Duration" number, "Fetch Image 
 
 ### Nix Integration
 
-- `flake.nix` — Defines packages (server, smartcrop), dev shell, NixOS module, and checks. Inputs track `nixos-unstable`; `nix develop` therefore ships a current Go, Python 3, and ESPHome
+- `flake.nix` — Defines the `server` package, dev shell, NixOS module, and checks. Inputs track `nixos-unstable`; `nix develop` therefore ships a current Go, Python 3, and ESPHome
 - `overlay.nix` — The package overlay, and the single source of truth for it: `flake.nix` sets `overlays.default = import ./overlay.nix`, so `nix flake check` exercises the same file downstream flakes import. It exports the same package set under three attributes: `pkgs.stillframe` (the current name, used by this repo and `server/service.nix`) plus `pkgs.picture-frame` and `pkgs.dynamic-frame` (older names, kept as aliases for downstream consumers)
-- `server/default.nix` — Builds smartcrop Python package, Go server, and wraps the binary so smartcrop-cli is in PATH. The wrapper must use `--prefix PATH :` — `--set PATH "...:$PATH"` expands `$PATH` at build time and drags the whole stdenv toolchain (~870 MiB) into the runtime closure of a network-facing daemon
+- `server/default.nix` — One `buildGoModule` derivation and nothing else. The server has no runtime dependency outside its own binary — the cropper is in-process and its cascade is embedded — so there is no wrapper script and nothing on PATH to arrange. (It used to wrap the binary to put `smartcrop-cli` on PATH; that whole path, Python package included, is gone. Should a wrapper ever be needed again, `--prefix PATH :` is the only safe form: `--set PATH "...:$PATH"` expands `$PATH` at build time and drags the whole stdenv toolchain, ~870 MiB, into the runtime closure of a network-facing daemon)
 
 Checks (`nix flake check`, and `.github/workflows/checks.yml` on the GitHub mirror):
 

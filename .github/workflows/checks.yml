@@ -108,9 +108,12 @@ jobs:
           echo "checks.service (NixOS VM test) SKIPPED: no /dev/kvm" >> "$GITHUB_STEP_SUMMARY"
 
       # A network-facing daemon must not carry a compiler in its runtime
-      # closure; server/default.nix wraps the binary with `--prefix PATH`
-      # precisely so it does not. Regressing that (e.g. back to
-      # `--set PATH "...:$PATH"`) inflates the closure from ~90 MiB to ~870 MiB.
+      # closure. The server has no runtime dependencies at all today - the
+      # cropper is in-process and its cascade is embedded - so it is a bare
+      # buildGoModule output with no wrapper. This guard exists because the
+      # wrapper it used to carry (to put smartcrop-cli on PATH) inflated the
+      # closure from ~90 MiB to ~870 MiB the moment it was written as
+      # `--set PATH "...:$PATH"`, which expands $PATH at build time.
       - name: Check the server's runtime closure
         run: |
           set -euo pipefail
@@ -122,7 +125,7 @@ jobs:
           echo "$refs"
           echo "::endgroup::"
           if echo "$refs" | grep -Eq -- '-(gcc|binutils|patchelf|gnumake)(-wrapper)?-'; then
-            echo "::error file=server/default.nix::The server's runtime closure references a build-time toolchain (gcc/binutils/patchelf/make). Check that wrapProgram uses '--prefix PATH :' and never '--set PATH \"...:\$PATH\"', which expands \$PATH at build time."
+            echo "::error file=server/default.nix::The server's runtime closure references a build-time toolchain (gcc/binutils/patchelf/make). The server should be a bare buildGoModule output with no wrapper; if one was added, wrapProgram must use '--prefix PATH :' and never '--set PATH \"...:\$PATH\"', which expands \$PATH at build time."
             exit 1
           fi
           nix path-info -Sh "$out" >> "$GITHUB_STEP_SUMMARY"

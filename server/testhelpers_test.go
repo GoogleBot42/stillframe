@@ -13,8 +13,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -216,71 +214,6 @@ func writeTempGIF(t *testing.T, dir, name string, img image.Image) string {
 		t.Fatalf("encode gif: %v", err)
 	}
 	return p
-}
-
-// ---------------------------------------------------------------------------
-// smartcrop-cli stub
-//
-// bestcrop.go shells out to the external `smartcrop-cli` Python program. It is
-// not available in the test environment (and we must not depend on Python), so
-// these helpers put a tiny shell script named `smartcrop-cli` on PATH. That
-// lets the full fetchImage pipeline be exercised end-to-end without touching
-// production code.
-// ---------------------------------------------------------------------------
-
-type smartcropStub struct {
-	dir     string
-	argsLog string // file the stub appends its argv to
-}
-
-// stubSmartcrop installs a fake smartcrop-cli that prints the given crop
-// rectangle as JSON. Returns the stub so tests can inspect the recorded argv.
-func stubSmartcrop(t *testing.T, x, y, w, h int) *smartcropStub {
-	t.Helper()
-	return stubSmartcropRaw(t, jsonCrop(x, y, w, h), 0)
-}
-
-func jsonCrop(x, y, w, h int) string {
-	b, _ := json.Marshal(PythonResult{X: x, Y: y, Width: w, Height: h})
-	return string(b)
-}
-
-// stubSmartcropRaw installs a fake smartcrop-cli that prints stdout verbatim and
-// exits with exitCode.
-func stubSmartcropRaw(t *testing.T, stdout string, exitCode int) *smartcropStub {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-script stub is POSIX only")
-	}
-	dir := t.TempDir()
-	argsLog := filepath.Join(dir, "args.log")
-	payload := filepath.Join(dir, "payload.json")
-	if err := os.WriteFile(payload, []byte(stdout), 0o644); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$*\" >> '" + argsLog + "'\n" +
-		"cat '" + payload + "'\n" +
-		"exit " + strconv.Itoa(exitCode) + "\n"
-	bin := filepath.Join(dir, "smartcrop-cli")
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return &smartcropStub{dir: dir, argsLog: argsLog}
-}
-
-func (s *smartcropStub) recordedArgs(t *testing.T) []string {
-	t.Helper()
-	data, err := os.ReadFile(s.argsLog)
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, line := range bytes.Split(bytes.TrimRight(data, "\n"), []byte("\n")) {
-		out = append(out, string(line))
-	}
-	return out
 }
 
 // ---------------------------------------------------------------------------
