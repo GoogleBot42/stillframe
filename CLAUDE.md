@@ -70,7 +70,7 @@ Key files:
 - `image.go` — Image decoding (PNG/JPEG/GIF/WebP), RGBA conversion, gamma correction. `decodeUpright` is the shared decode + EXIF-orientation path, used by both `ReadImage` (files) and the Immich download
 - `einkimage.go` — Color space mapping, CIEDE2000 dithering, nibble packing
 - `bestcrop.go` — Crop selection: pure-Go face detection ([pigo](https://github.com/esimov/pigo), cascade embedded from `server/cascade/facefinder` with `//go:embed`) positions the crop over the faces; with no faces found it is a plain center crop, which is also the fallback whenever detection cannot run. No subprocess, no temp files, no Python
-- `service.nix` — NixOS systemd service module `services.stillframe-server` (configurable port, imgDir, user/group)
+- `service.nix` — NixOS systemd service module `services.stillframe-server` (port, optional imgDir — defaults to a systemd `StateDirectory` at `/var/lib/stillframe-server/images` — user/group, environmentFile)
 - `service-test.nix` — NixOS VM test that verifies the service starts
 
 ### ESPHome Firmware (`esphome/`)
@@ -132,4 +132,4 @@ Checks (`nix flake check`, and `.github/workflows/checks.yml` on the GitHub mirr
 
 - `checks.build` — builds the server; buildGoModule's checkPhase runs the Go tests
 - `checks.einkTests` — compiles and runs `esphome/tests/run.sh` (host unit tests for the panel-independent display logic) in the sandbox, with `CXX` and `EINK_TESTS_NIX_RETRY=1` set so its `nix shell` fallback never fires
-- `checks.service` — NixOS VM test: starts the systemd service, asserts `/calibrationImage` answers 200 with a non-empty body, and that a `/fetchImage` against an imgDir with no usable images cannot kill the daemon (the main PID must be unchanged)
+- `checks.service` — NixOS VM test, two nodes (imgDir set, imgDir unset): starts the systemd service, asserts `/calibrationImage` answers 200 with a non-empty body, and that a `/fetchImage` against an imgDir with no usable images cannot kill the daemon (the main PID must be unchanged); also pins the rendered unit — a set imgDir gets no `StateDirectory`, an unset one gets the state directory and it exists
