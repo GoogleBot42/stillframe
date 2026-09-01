@@ -241,25 +241,31 @@ func mustJSON(t *testing.T, v interface{}) *bytes.Reader {
 }
 
 // withImageDir points the package-level imageDir at dir for the duration of the
-// test.
-// It also clears the "last served" memory, so a directory installed by one test
-// is never judged against a file another test served.
+// test, and installs the matching local-directory source — main() builds the
+// two together, so a test that moved only one of them would be exercising a
+// configuration the server can never be in.
+//
+// Installing the source is the point, not a side effect: a test that wants some
+// other source must call withImageSource *after* this, because that is the call
+// that overrides what this one installed. The fresh localDirSource also starts
+// with an empty no-repeat memory, so a directory installed by one test is never
+// judged against a file another test served.
 func withImageDir(t *testing.T, dir string) {
 	t.Helper()
 	old := imageDir
 	imageDir = dir
 	t.Cleanup(func() { imageDir = old })
-	withLastServed(t, "")
+	withImageSource(t, &localDirSource{dir: dir})
 }
 
-// withLastServed pins the "file the previous request served" memory for the
-// duration of the test, and restores it afterwards so the no-repeat state does
-// not leak between tests.
-func withLastServed(t *testing.T, path string) {
+// withImageSource points /fetchImage at src for the duration of the test. It
+// overrides whatever source is installed, including the one withImageDir puts
+// there, so it comes last when both are used.
+func withImageSource(t *testing.T, src ImageSource) {
 	t.Helper()
-	old := lastServed()
-	rememberServed(path)
-	t.Cleanup(func() { rememberServed(old) })
+	old := imageSource
+	imageSource = src
+	t.Cleanup(func() { imageSource = old })
 }
 
 // silenceStdout redirects os.Stdout for the duration of the test; the handlers

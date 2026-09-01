@@ -54,7 +54,7 @@ bash esphome/tests/run.sh
 ### Image Processing Pipeline
 
 1. ESP32 firmware POSTs JSON to server describing display capabilities (dimensions, color space, flip settings)
-2. Server selects a random image from its configured directory
+2. Server selects a random image from its configured directory, or from an Immich library when one is configured (see `source.go`/`immich.go`)
 3. Server pipeline: face-aware crop (in-process, pigo) → Lanczos3 resize → gamma correction → CIEDE2000 nearest-color mapping → Floyd-Steinberg dithering → nibble packing (2 pixels/byte)
 4. Server returns raw binary image data
 5. Firmware writes to e-ink display via SPI, then enters deep sleep
@@ -64,8 +64,10 @@ bash esphome/tests/run.sh
 Go 1.19 with chi router. Three POST endpoints: `/fetchImage`, `/calibrationImage`, `/clearImage`.
 
 Key files:
-- `main.go` — HTTP server, routing, CLI args (port, image directory)
-- `image.go` — Image decoding (PNG/JPEG/GIF), RGBA conversion, gamma correction
+- `main.go` — HTTP server, routing, CLI args (port, image directory), and the package-level `imageSource` the handlers draw from
+- `source.go` — The `ImageSource` interface (`NextImage(ctx)`), `localDirSource` (the directory walk, shuffle and no-repeat memory), and `fallbackSource`, which serves the local directory whenever the primary source errors
+- `immich.go` — Optional [Immich](https://immich.app) source, configured *only* through `IMMICH_URL` / `IMMICH_API_KEY` / `IMMICH_ALBUM` (the positional args are interpolated by `service.nix` and must not change). `POST /api/search/random` picks the asset, `GET /api/assets/{id}/thumbnail?size=preview` downloads the server's transcode so HEIC/RAW never has to be decoded here, and an album name is resolved through `GET /api/albums` and cached for the process (failures are not cached). Never the only source: it is always wrapped in a `fallbackSource`, because a frame that misses a refresh looks exactly like a healthy one. Written against the documented API and verified only against httptest mocks — the API-version assumptions are documented on the `immichSource` type
+- `image.go` — Image decoding (PNG/JPEG/GIF/WebP), RGBA conversion, gamma correction. `decodeUpright` is the shared decode + EXIF-orientation path, used by both `ReadImage` (files) and the Immich download
 - `einkimage.go` — Color space mapping, CIEDE2000 dithering, nibble packing
 - `bestcrop.go` — Crop selection: pure-Go face detection ([pigo](https://github.com/esimov/pigo), cascade embedded from `server/cascade/facefinder` with `//go:embed`) positions the crop over the faces; with no faces found it is a plain center crop, which is also the fallback whenever detection cannot run. No subprocess, no temp files, no Python
 - `service.nix` — NixOS systemd service module `services.stillframe-server` (configurable port, imgDir, user/group)

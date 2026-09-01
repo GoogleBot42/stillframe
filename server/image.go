@@ -10,6 +10,36 @@ import (
 	"os"
 )
 
+// decodeUpright decodes one encoded image and returns it the way up it was
+// taken. It takes a ReadSeeker because the orientation has to be read before
+// the pixels and the same bytes then decoded from the top; that is the only
+// reason this is not an io.Reader.
+//
+// Every source has to come through here, not just files on disk. A photo pulled
+// from a photo manager over HTTP is exactly as likely to carry an orientation
+// tag as one copied off an SD card, and the two paths rendering the same JPEG
+// differently — one upright, one on its side — would be a bug nobody could
+// explain from the frame's behaviour.
+func decodeUpright(r io.ReadSeeker) (image.Image, error) {
+	// Read the EXIF orientation before decoding: image/jpeg throws the metadata
+	// away, so by the time we have pixels the "turn me 90 degrees" that phone
+	// cameras record is gone. Non-JPEGs fail the SOI check immediately and come
+	// back as orientation 1, so PNG, GIF and WebP pass through untouched.
+	orientation := exifOrientation(r)
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewinding: %w", err)
+	}
+
+	img, _, err := image.Decode(r)
+	if err != nil {
+		return nil, fmt.Errorf("decoding: %w", err)
+	}
+
+	// Normalise here, ahead of everything: smart crop, resize and the device's
+	// own flip_vertical/flip_horizonal transform all assume upright input.
+	return applyExifOrientation(img, orientation), nil
+}
+
 func ReadImage(name string) (image.Image, error) {
 	file, err := os.Open(name)
 	if err != nil {
@@ -17,23 +47,11 @@ func ReadImage(name string) (image.Image, error) {
 	}
 	defer file.Close()
 
-	// Read the EXIF orientation before decoding: image/jpeg throws the metadata
-	// away, so by the time we have pixels the "turn me 90 degrees" that phone
-	// cameras record is gone. Non-JPEGs fail the SOI check immediately and come
-	// back as orientation 1, so PNG and GIF pass through untouched.
-	orientation := exifOrientation(file)
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("rewinding %q: %w", name, err)
-	}
-
-	img, _, err := image.Decode(file)
+	img, err := decodeUpright(file)
 	if err != nil {
-		return nil, fmt.Errorf("decoding %q: %w", name, err)
+		return nil, fmt.Errorf("reading %q: %w", name, err)
 	}
-
-	// Normalise here, ahead of everything: smart crop, resize and the device's
-	// own flip_vertical/flip_horizonal transform all assume upright input.
-	return applyExifOrientation(img, orientation), nil
+	return img, nil
 }
 
 func imageToRGBA(src image.Image) *image.RGBA {
