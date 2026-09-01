@@ -68,7 +68,7 @@ nix build .#server
 ```
 
 Or as a NixOS service via the flake's `nixosModules.default` (see
-`server/service.nix` for options: port, image directory, user/group,
+`server/service.nix` for options: port, optional image directory, user/group,
 environment file).
 
 ### Immich
@@ -89,7 +89,7 @@ Nix store — it is world-readable — by having sops-nix or agenix render the f
 ```nix
 services.stillframe-server = {
   enable = true;
-  imgDir = "/var/lib/stillframe/images";   # still the fallback, see below
+  # imgDir = "/var/lib/stillframe/images";   # optional; still the fallback, see below
   environmentFile = "/run/secrets/stillframe-server.env";
 };
 ```
@@ -104,6 +104,12 @@ The image directory stays the fallback: if Immich is down, slow, misconfigured
 or answers something unusable, the request is logged and served from disk
 instead, because a frame that misses a refresh just keeps showing yesterday's
 photo and nobody notices.
+
+`imgDir` is optional, and left unset the service falls back to an empty
+systemd state directory (`/var/lib/stillframe-server/images`) — so an
+Immich-only deployment needs no local photos at all. Dropping a handful in
+there anyway is worth it: it is the difference between an Immich outage
+refreshing the frame with something and refreshing it with nothing.
 
 Only the server's own transcoded previews are downloaded
 (`/api/assets/{id}/thumbnail?size=preview`), so HEIC and RAW originals need no
