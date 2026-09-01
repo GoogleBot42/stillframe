@@ -853,9 +853,9 @@ func TestFetchImageIgnoresSubdirectories(t *testing.T) {
 // ===========================================================================
 
 // drawOne returns the file the next fetch would try first.
-func drawOne(t *testing.T, dir string) string {
+func drawOne(t *testing.T, dir, last string) string {
 	t.Helper()
-	candidates, err := imageCandidates(dir)
+	candidates, err := imageCandidates(dir, last)
 	if err != nil {
 		t.Fatalf("imageCandidates(%q): %v", dir, err)
 	}
@@ -863,9 +863,9 @@ func drawOne(t *testing.T, dir string) string {
 }
 
 // mustCandidates returns the candidate list as a set.
-func mustCandidates(t *testing.T, dir string) map[string]bool {
+func mustCandidates(t *testing.T, dir, last string) map[string]bool {
 	t.Helper()
-	candidates, err := imageCandidates(dir)
+	candidates, err := imageCandidates(dir, last)
 	if err != nil {
 		t.Fatalf("imageCandidates(%q): %v", dir, err)
 	}
@@ -889,11 +889,9 @@ func TestImageCandidatesDrawsFromTheDirectory(t *testing.T) {
 		}
 		want[p] = true
 	}
-	withLastServed(t, "")
-
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		got := drawOne(t, dir)
+		got := drawOne(t, dir, "")
 		if !want[got] {
 			t.Fatalf("returned %q which is not one of the files in the directory", got)
 		}
@@ -916,9 +914,7 @@ func TestImageCandidatesOffersEveryFile(t *testing.T) {
 		}
 		want[p] = true
 	}
-	withLastServed(t, "")
-
-	got := mustCandidates(t, dir)
+	got := mustCandidates(t, dir, "")
 	if len(got) != len(want) {
 		t.Fatalf("got %d candidates, want %d: %v", len(got), len(want), got)
 	}
@@ -930,7 +926,7 @@ func TestImageCandidatesOffersEveryFile(t *testing.T) {
 }
 
 func TestImageCandidatesMissingDirectory(t *testing.T) {
-	if _, err := imageCandidates(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+	if _, err := imageCandidates(filepath.Join(t.TempDir(), "does-not-exist"), ""); err == nil {
 		t.Error("expected an error for a missing directory")
 	}
 }
@@ -938,7 +934,7 @@ func TestImageCandidatesMissingDirectory(t *testing.T) {
 // An empty candidate list would index out of range downstream, so it has to be
 // reported as an error up front.
 func TestImageCandidatesEmptyDirectory(t *testing.T) {
-	got, err := imageCandidates(t.TempDir())
+	got, err := imageCandidates(t.TempDir(), "")
 	if err == nil {
 		t.Fatalf("expected an error for an empty directory, got %q", got)
 	}
@@ -953,7 +949,7 @@ func TestImageCandidatesOnlySubdirectories(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := imageCandidates(dir); err == nil {
+	if got, err := imageCandidates(dir, ""); err == nil {
 		t.Errorf("expected an error when the directory holds no files, got %q", got)
 	}
 }
@@ -967,7 +963,7 @@ func TestImageCandidatesOnlyDotfiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got, err := imageCandidates(dir); err == nil {
+	if got, err := imageCandidates(dir, ""); err == nil {
 		t.Errorf("expected an error when the directory holds only dotfiles, got %q", got)
 	}
 }
@@ -986,10 +982,8 @@ func TestImageCandidatesWithSubdirectories(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	withLastServed(t, "")
-
 	for i := 0; i < 100; i++ {
-		if got := drawOne(t, dir); got != only {
+		if got := drawOne(t, dir, ""); got != only {
 			t.Fatalf("iteration %d: got %q, want %q", i, got, only)
 		}
 	}
@@ -1009,16 +1003,14 @@ func TestImageCandidatesTryDecodableExtensionsFirst(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	withLastServed(t, "")
-
 	for i := 0; i < 100; i++ {
-		if got := drawOne(t, dir); got != only {
+		if got := drawOne(t, dir, ""); got != only {
 			t.Fatalf("iteration %d drew %q before the one file with a decodable extension %q", i, got, only)
 		}
 	}
 	// They stay on the queue behind it: a directory is not allowed to become
 	// unservable because its only decodable-looking file is corrupt.
-	if got := mustCandidates(t, dir); len(got) != len(junk)+1 {
+	if got := mustCandidates(t, dir, ""); len(got) != len(junk)+1 {
 		t.Errorf("got %d candidates, want %d: %v", len(got), len(junk)+1, got)
 	}
 }
@@ -1036,9 +1028,7 @@ func TestImageCandidatesSkipsDotfiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	withLastServed(t, "")
-
-	got := mustCandidates(t, dir)
+	got := mustCandidates(t, dir, "")
 	if len(got) != 1 || !got[only] {
 		t.Errorf("candidates %v, want only %q", got, only)
 	}
@@ -1056,9 +1046,7 @@ func TestImageCandidatesAcceptEveryDecodableExtension(t *testing.T) {
 		}
 		want[p] = true
 	}
-	withLastServed(t, "")
-
-	got := mustCandidates(t, dir)
+	got := mustCandidates(t, dir, "")
 	for p := range want {
 		if !got[p] {
 			t.Errorf("%q was filtered out even though its extension is decodable", p)
@@ -1082,9 +1070,7 @@ func TestImageCandidatesOfferFilesWithoutADecodableExtension(t *testing.T) {
 	if err := writeFile(filepath.Join(dir, ".DS_Store"), "x"); err != nil {
 		t.Fatal(err)
 	}
-	withLastServed(t, "")
-
-	got := mustCandidates(t, dir)
+	got := mustCandidates(t, dir, "")
 	if len(got) != len(want) {
 		t.Fatalf("got %d candidates, want %d: %v", len(got), len(want), got)
 	}
@@ -1135,10 +1121,8 @@ func TestImageCandidatesPutTheLastServedFileLast(t *testing.T) {
 		}
 		paths = append(paths, p)
 	}
-	withLastServed(t, paths[0])
-
 	for i := 0; i < 100; i++ {
-		candidates, err := imageCandidates(dir)
+		candidates, err := imageCandidates(dir, paths[0])
 		if err != nil {
 			t.Fatalf("iteration %d: %v", i, err)
 		}
@@ -1154,6 +1138,36 @@ func TestImageCandidatesPutTheLastServedFileLast(t *testing.T) {
 	}
 }
 
+// The no-repeat memory belongs to the source, not to the package: a second
+// source over the same directory starts with none, which is what keeps a
+// fallback to disk from being judged against a file some other source served.
+// Two files alternate, because each draw pushes the one just served to the back.
+func TestLocalDirSourceRemembersWhatItServed(t *testing.T) {
+	dir := t.TempDir()
+	writeTempPNG(t, dir, "a.png", gradientRGBA(8, 8))
+	writeTempPNG(t, dir, "b.png", gradientRGBA(8, 8))
+
+	src := &localDirSource{dir: dir}
+	_, previous, err := src.NextImage(context.Background())
+	if err != nil {
+		t.Fatalf("NextImage: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		_, name, err := src.NextImage(context.Background())
+		if err != nil {
+			t.Fatalf("NextImage %d: %v", i, err)
+		}
+		if name == previous {
+			t.Fatalf("draw %d repeated %q back-to-back", i, name)
+		}
+		previous = name
+	}
+
+	if fresh := (&localDirSource{dir: dir}).lastServed(); fresh != "" {
+		t.Errorf("a new source remembered %q; the memory must not be shared", fresh)
+	}
+}
+
 // Avoiding a repeat must never mean serving nothing: a one-image directory
 // keeps serving its one image.
 func TestImageCandidatesSingleFileStillServedAfterBeingServed(t *testing.T) {
@@ -1162,10 +1176,8 @@ func TestImageCandidatesSingleFileStillServedAfterBeingServed(t *testing.T) {
 	if err := writeFile(only, "x"); err != nil {
 		t.Fatal(err)
 	}
-	withLastServed(t, only)
-
 	for i := 0; i < 20; i++ {
-		if got := drawOne(t, dir); got != only {
+		if got := drawOne(t, dir, only); got != only {
 			t.Fatalf("iteration %d: got %q, want %q", i, got, only)
 		}
 	}

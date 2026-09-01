@@ -67,8 +67,51 @@ nix build .#server
 ./result/bin/server 8080 /path/to/images   # args optional: port, image dir
 ```
 
-Or as a NixOS service via the flake's `nixosModules.default`
-(see `server/service.nix` for options: port, image directory, user/group).
+Or as a NixOS service via the flake's `nixosModules.default` (see
+`server/service.nix` for options: port, image directory, user/group,
+environment file).
+
+### Immich
+
+The server can draw from an [Immich](https://immich.app) library instead of the
+image directory. It is configured entirely through the environment, so the
+positional arguments above are unchanged:
+
+| Variable | Meaning |
+| --- | --- |
+| `IMMICH_URL` | Instance root, e.g. `https://photos.example.com`. Unset (the default) disables Immich entirely |
+| `IMMICH_API_KEY` | API key from Immich's Account Settings; required when `IMMICH_URL` is set |
+| `IMMICH_ALBUM` | Optional album, by name (case-insensitive) or UUID. Unset draws from the whole timeline |
+
+On NixOS, point the service at an environment file. Keep the API key out of the
+Nix store — it is world-readable — by having sops-nix or agenix render the file:
+
+```nix
+services.stillframe-server = {
+  enable = true;
+  imgDir = "/var/lib/stillframe/images";   # still the fallback, see below
+  environmentFile = "/run/secrets/stillframe-server.env";
+};
+```
+
+```
+IMMICH_URL=https://photos.example.com
+IMMICH_API_KEY=...
+IMMICH_ALBUM=Living Room
+```
+
+The image directory stays the fallback: if Immich is down, slow, misconfigured
+or answers something unusable, the request is logged and served from disk
+instead, because a frame that misses a refresh just keeps showing yesterday's
+photo and nobody notices.
+
+Only the server's own transcoded previews are downloaded
+(`/api/assets/{id}/thumbnail?size=preview`), so HEIC and RAW originals need no
+decoding here.
+
+**Not yet validated against a live instance** — the integration is written from
+the documented API and tested against mocks. Expect to check the server log the
+first time you point it at a real Immich.
 
 ## Development
 

@@ -9,3 +9,5 @@ require (
 )
 
 require github.com/esimov/pigo v1.4.6
+
+require golang.org/x/image v0.18.0

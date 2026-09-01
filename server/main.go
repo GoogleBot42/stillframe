@@ -4,22 +4,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image"
 	"io"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
-	"sync"
 	"time"
 
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+
+	// Immich's preview is whatever its admin configured the server to
+	// transcode to: JPEG out of the box, WebP if the "thumbnail format"
+	// setting was changed. The standard library has no WebP decoder, so
+	// registering this one is what keeps that setting from turning every
+	// refresh into a decode failure. It also lets a .webp file sitting in the
+	// local image directory be served — which is why the registration lives
+	// here, next to the standard-library decoders, rather than in immich.go:
+	// source.go's decodableExtensions offers .webp before every extension-less
+	// file, so a build without this import would prefer files it cannot decode.
+	_ "golang.org/x/image/webp"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -27,6 +33,12 @@ import (
 
 var imageDir = "./img"
 var port = "8080"
+
+// imageSource is where /fetchImage gets its photo. main() replaces it once the
+// positional arguments and the environment have been read; it is initialised
+// here as well so that anything constructing the router without going through
+// main() — the tests do — has a working source rather than a nil interface.
+var imageSource ImageSource = &localDirSource{dir: imageDir}
 
 // The endpoints are unauthenticated by design, so every bound the pipeline
 // needs has to be a hard limit here rather than an assumption about who is
@@ -98,130 +110,6 @@ func limitConcurrency(next http.Handler) http.Handler {
 			http.Error(w, "server busy", http.StatusServiceUnavailable)
 		}
 	})
-}
-
-// decodableExtensions are the file suffixes image.Decode can handle with the
-// decoders this package registers. A .heic exported from a phone, a .mp4 or a
-// stray .txt is a guaranteed decode failure, so it is not drawn while anything
-// better is available.
-var decodableExtensions = map[string]bool{
-	".png":  true,
-	".jpg":  true,
-	".jpeg": true,
-	".jpe":  true,
-	".jfif": true,
-	".gif":  true,
-}
-
-// The draw has no memory of its own, so a small directory shows the same photo
-// twice in a row surprisingly often (1 in 20 for 20 images). Remembering the
-// file the last request served, and trying it last, removes the back-to-back
-// repeat. It is one process-wide value, so with several frames pointed at one
-// server the guarantee weakens to "not the last picture this server served".
-// Guarded by a mutex: chi serves every request in its own goroutine.
-var (
-	lastServedMu   sync.Mutex
-	lastServedFile string
-)
-
-func rememberServed(path string) {
-	lastServedMu.Lock()
-	lastServedFile = path
-	lastServedMu.Unlock()
-}
-
-func lastServed() string {
-	lastServedMu.Lock()
-	defer lastServedMu.Unlock()
-	return lastServedFile
-}
-
-// imageCandidates lists the files in dir worth trying, in the order to try
-// them. Sub-directories are not pictures, and dotfiles are either metadata
-// (.DS_Store) or rsync's partial transfers, so neither is a candidate at all.
-// Everything else is: the files whose extension the registered decoders
-// understand come first, and the rest follow rather than being dropped, because
-// image.Decode goes by content — an extension-less export is still a picture,
-// and it must not be unreachable just because one .jpg in the directory happens
-// to be corrupt.
-func imageCandidates(dir string) ([]string, error) {
-	entries, err := ioutil.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	var decodable, rest []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		if decodableExtensions[strings.ToLower(filepath.Ext(name))] {
-			decodable = append(decodable, path)
-		} else {
-			rest = append(rest, path)
-		}
-	}
-
-	last := lastServed()
-	files := append(drawOrder(decodable, last), drawOrder(rest, last)...)
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no usable image files in %q: %w", dir, os.ErrNotExist)
-	}
-
-	return files, nil
-}
-
-// drawOrder shuffles files and moves last, the previously served file, to the
-// back — to the back rather than out of the list, so that a one-image directory
-// keeps serving its one image and a directory whose other files are all broken
-// still falls back to the one that works.
-func drawOrder(files []string, last string) []string {
-	rand.Shuffle(len(files), func(i, j int) { files[i], files[j] = files[j], files[i] })
-
-	if last == "" || len(files) < 2 {
-		return files
-	}
-	for i, f := range files {
-		if f == last {
-			copy(files[i:], files[i+1:])
-			files[len(files)-1] = last
-			break
-		}
-	}
-	return files
-}
-
-// pickImage returns a decoded image from dir, walking past the candidates that
-// fail to decode. A file can be undecodable despite its name (truncated,
-// half-written mid-rsync, misnamed), and a single such file used to cost the
-// frame a whole sleep cycle — up to hours of stale picture — because the
-// request 500'd instead of trying another file. Only a directory where nothing
-// at all decodes is an error; the walk is bounded by the candidate count, and
-// each rejection costs one open plus a failed format sniff.
-func pickImage(dir string) (image.Image, string, error) {
-	candidates, err := imageCandidates(dir)
-	if err != nil {
-		return nil, "", err
-	}
-
-	var lastErr error
-	for _, path := range candidates {
-		img, err := ReadImage(path)
-		if err == nil {
-			rememberServed(path)
-			return img, path, nil
-		}
-		log.Printf("skipping unusable image %q: %v", path, err)
-		lastErr = err
-	}
-
-	// candidates is never empty, so a decode error is always set here.
-	return nil, "", lastErr
 }
 
 type ImageProperties struct {
@@ -369,9 +257,12 @@ func fetchImage(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Color code: %d, RGB: %v\n", color.Code, color.Color)
 	}
 
-	img, randomImgFile, err := pickImage(imageDir)
+	img, randomImgFile, err := imageSource.NextImage(r.Context())
 	if err != nil {
-		log.Printf("picking an image from %q: %v", imageDir, err)
+		// With Immich configured this is the error from the *fallback*: the
+		// Immich failure has already been logged by fallbackSource, so both
+		// halves of "neither source could produce a picture" are in the log.
+		log.Printf("picking an image: %v", err)
 		http.Error(w, "no image available", http.StatusInternalServerError)
 		return
 	}
@@ -429,6 +320,21 @@ func main() {
 		imageDir = os.Args[2]
 	}
 	fmt.Println("Choosing images from: ", imageDir)
+
+	// The image source is chosen from the environment rather than from more
+	// positional arguments: server/service.nix interpolates the port and the
+	// directory by position, and a NixOS module that has been deployed is not
+	// something to break for a feature most installs will not turn on.
+	local := &localDirSource{dir: imageDir}
+	imageSource = local
+	if immich, err := immichSourceFromEnv(); err != nil {
+		// Half-configured is a mistake worth naming, but not worth refusing to
+		// start over: the frames still get pictures from the directory.
+		log.Printf("warning: ignoring the Immich configuration (%v); serving only from %q", err, imageDir)
+	} else if immich != nil {
+		imageSource = fallbackSource{primary: immich, fallback: local}
+		fmt.Printf("Image sources: Immich at %s (%s), falling back to %s\n", immich.baseURL, immich.albumDescription(), imageDir)
+	}
 
 	// Seed once at startup rather than on every draw.
 	rand.Seed(time.Now().UnixNano())
