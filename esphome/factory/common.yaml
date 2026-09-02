@@ -1,0 +1,96 @@
+# Everything the five factory (public) firmware builds share.
+#
+# This is what CI builds and publishes; end users never edit it. A factory
+# build is the adoptable config plus the pieces that only make sense for a
+# pre-built binary:
+#   - dashboard_import so the ESPHome dashboard can adopt the device
+#   - ota/update over http_request so the published manifest can update it
+# Those pieces are identical for every variant apart from the variant name, so
+# they live here once and each esphome/factory/<variant>.yaml is reduced to the
+# `variant` substitution plus an include of this file. Add a device here, not
+# five copies of the same fix (the watchdog-clobber fix in 7351c4b had to be
+# made in five places).
+#
+# CI builds a factory config only on a `vX.Y.Z` release tag, passing
+# `firmware_version=<the tag without its leading v>`; the manifest version and
+# the device's project version must match exactly for the update entity to
+# work. `dev` stays the default so a local `esphome compile` of a factory
+# config works with no `-s`.
+
+substitutions:
+  firmware_version: dev
+
+# The adoptable config for this variant. A package's `!include` path may
+# contain substitutions: config.py runs do_packages_pass BEFORE
+# do_substitution_pass, and the packages pass resolves the include itself,
+# seeding its context from the including file's root `substitutions:`. So
+# `${variant}` is in scope here.
+packages:
+  device: !include ../${variant}.yaml
+
+esphome:
+  project:
+    name: googlebot42.stillframe
+    version: ${firmware_version}
+  # Public builds are flashed to many identical devices; keep hostnames unique
+  # until the device is adopted (adoption bakes the resolved name into the
+  # user's config).
+  name_add_mac_suffix: true
+  on_boot:
+    # Only worth checking for firmware updates when the frame is deliberately
+    # staying awake long enough to install one, i.e. while "Prevent Deep Sleep"
+    # is on (which is also what holding the wake button through a reset turns
+    # on — see ../common.yaml's on_boot).
+    #
+    # The gate is a `wait_until` with NO timeout rather than a plain `if`, so
+    # that flipping the switch on from Home Assistant *after* boot also opens
+    # the window. On a normal wake it simply never completes, and the whole
+    # automation dies with the chip when maybe_sleep enters deep sleep.
+    #
+    # `update_interval: never` below is the other half of this gate: otherwise
+    # the update platform schedules its own check ~10 s after every single boot
+    # regardless of anything here (HttpRequestUpdate::setup does this whenever
+    # the interval is not "never"), which is exactly what this avoids. Home
+    # Assistant's own "check for update" command still works — it calls the
+    # entity directly rather than going through the poll interval.
+    - priority: -200.0
+      then:
+        - wait_until:
+            condition:
+              switch.is_on: prevent_deep_sleep
+        - wait_until:
+            condition: wifi.connected
+            timeout: 60s
+        # Serialize behind the boot image fetch: the update check runs in its
+        # own task whose watchdog raise/restore is global — overlapping a
+        # blocking fetch clobbers the fetch raised window (field-observed
+        # boot loop). Wait for the fetch script to finish before checking.
+        - wait_until:
+            condition:
+              not:
+                script.is_running: fetch_and_display
+        - if:
+            condition: wifi.connected
+            then:
+              - logger.log:
+                  format: "Checking for firmware updates..."
+                  level: INFO
+              - component.update: firmware_update
+
+dashboard_import:
+  package_import_url: github://GoogleBot42/stillframe/esphome/${variant}.yaml@main
+  import_full_config: false
+
+ota:
+  - platform: http_request
+
+update:
+  - platform: http_request
+    name: "Firmware"
+    id: firmware_update
+    source: https://googlebot42.github.io/stillframe/firmware/${variant}/manifest.json
+    # Never poll on a schedule: a frame is asleep almost all of the time, so a
+    # periodic check just means "hit GitHub Pages on every wake". The explicit
+    # `component.update: firmware_update` in on_boot above is the only
+    # automatic check, and it only fires during a deliberate OTA window.
+    update_interval: never

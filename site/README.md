@@ -82,8 +82,9 @@ compares the manifest version against the compiled `ESPHOME_PROJECT_VERSION`
 with a plain **string equality** check — no semver, no ordering. Equal means
 "up to date", anything else means "update available".
 
-So each `esphome/factory/<variant>.yaml` must expose the version as a
-substitution the workflow can override:
+So the factory configs must expose the version as a substitution the workflow
+can override. All five share `esphome/factory/common.yaml`, so it lives there
+once:
 
 ```yaml
 substitutions:
