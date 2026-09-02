@@ -159,8 +159,9 @@ jobs:
       # source (they do — both derive from `esphome.project.version`), and that
       # value must change on every publish or devices will never update.
       #
-      # Therefore each esphome/factory/<variant>.yaml must wire the version to a
-      # substitution that this workflow overrides:
+      # Therefore the factory configs must wire the version to a substitution
+      # that this workflow overrides. All five share esphome/factory/common.yaml,
+      # so it lives there once:
       #
       #     substitutions:
       #       firmware_version: dev          # local builds
@@ -227,7 +228,7 @@ jobs:
 
           got="$(jq -r '.version' "$manifest")"
           if [ "$got" != "${FIRMWARE_VERSION}" ]; then
-            echo "::error file=esphome/factory/${{ matrix.variant }}.yaml::Manifest version is '${got}' but this build stamped '${FIRMWARE_VERSION}'. esphome/factory/${{ matrix.variant }}.yaml must set 'esphome.project.version: \${firmware_version}' with a 'firmware_version' substitution, so the build-time override takes effect. Without it the published version never changes and devices will never see an update (http_request update compares version strings exactly)."
+            echo "::error file=esphome/factory/${{ matrix.variant }}.yaml::Manifest version is '${got}' but this build stamped '${FIRMWARE_VERSION}'. esphome/factory/common.yaml (included by every esphome/factory/<variant>.yaml) must set 'esphome.project.version: \${firmware_version}' with a 'firmware_version' substitution, so the build-time override takes effect. Without it the published version never changes and devices will never see an update (http_request update compares version strings exactly)."
             exit 1
           fi
 
