@@ -36,6 +36,12 @@ of panel-specific hooks.
 1. **Flash from the browser** — open the
    [install page](https://googlebot42.github.io/stillframe/) in Chrome or
    Edge, plug the board in over USB, and click Install for your variant.
+   **Inkplate 13 Spectra owners:** a factory-fresh board usually cannot be
+   flashed from the browser at all — its auto-reset circuit does not
+   cooperate with esptool-js. Do the first flash from the command line
+   instead ([recipe](site/README.md#flashing-from-the-command-line)); after
+   that, the "Enter Flashing Mode" button makes browser and OTA updates
+   reliable.
 2. **Wi-Fi in the same dialog** — the installer prompts for your network via
    Improv Serial. There is deliberately no fallback hotspot; to re-provision
    later, plug into USB again.
