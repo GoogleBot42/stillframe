@@ -170,10 +170,13 @@ in
         # maxPixels to 4 Mpx to halve that, so a request at the cap costs on the
         # order of 260 MB and maxConcurrentRequests allows two at once. 1G is
         # roughly twice that worst case, and vastly more than the normal one —
-        # panel-sized images, a few tens of MB. What it buys is that a
-        # pathological request restarts this one service instead of triggering
-        # the OOM killer somewhere else on the host.
-        MemoryMax = "1G";
+        # panel-sized images, a few tens of MB. On a host with more RAM than
+        # that it means a pathological request restarts this one service
+        # instead of triggering the OOM killer somewhere else. On a 1 GB
+        # Raspberry Pi the cap sits at physical RAM and never binds, so the
+        # global OOM killer still goes first — hence mkDefault: an operator on
+        # a small host can lower it with a plain assignment instead of mkForce.
+        MemoryMax = lib.mkDefault "1G";
       };
     };
   };

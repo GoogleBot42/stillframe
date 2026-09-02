@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -453,6 +454,35 @@ func TestImageRequestsAreConcurrencyLimited(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status %d, want 503 (body %q)", rec.Code, rec.Body.String())
+	}
+}
+
+// The body must be decoded before the request queues for a conversion slot,
+// not after: the server's read deadline is armed when the request line
+// arrives, so a frame that waited in the queue longer than readTimeout would
+// otherwise have its body read fail and be answered 400 — a stale picture for
+// a whole sleep cycle, on precisely the busy morning the queue exists for.
+// With every slot held, a malformed body has to come back 400 straight away;
+// if it queued first, this request's context would expire in the queue and it
+// would be answered 503 instead.
+func TestBodyIsDecodedBeforeQueueing(t *testing.T) {
+	for i := 0; i < maxConcurrentRequests; i++ {
+		imageSlots <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < maxConcurrentRequests; i++ {
+			<-imageSlots
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/clearImage", strings.NewReader(`{"width": 0`)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	newTestRouter().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status %d, want 400 before any slot is waited for (body %q)", rec.Code, rec.Body.String())
 	}
 }
 

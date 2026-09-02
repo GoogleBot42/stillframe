@@ -1,13 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -102,9 +102,10 @@ const maxConcurrentRequests = 2
 // picked, because it bounds the whole handler, not just the socket write. The
 // worst case a legitimate /fetchImage can take is, in order:
 //
-//   - up to maxConcurrentRequests-1 conversions ahead of it in
-//     limitConcurrency's queue (this deadline is set before the handler runs,
-//     so queueing counts against it);
+//   - the conversions ahead of it in limitConcurrency's queue (this deadline
+//     is set before the handler runs, so queueing counts against it). The
+//     queue has no depth cap, so this is the *normal* worst case — a handful
+//     of frames waking in the same minute — not a proven bound;
 //   - the Immich download, itself bounded by immichTimeout (30 s), plus the
 //     local-directory fallback retrying past undecodable files if Immich
 //     fails;
@@ -118,9 +119,13 @@ const maxConcurrentRequests = 2
 //
 // The read deadlines can be short because the request body is capped at
 // maxBodyBytes (16 KiB): no honest client needs 15 s to send under a kilobyte
-// of JSON, and ReadHeaderTimeout is what actually stops Slowloris. IdleTimeout
-// bounds a kept-alive connection between requests; the firmware sends one
-// request per wake and then sleeps, so nothing legitimate sits idle.
+// of JSON, and ReadHeaderTimeout is what actually stops Slowloris. But the
+// read deadline, like the write one, is armed when the request line arrives,
+// so it too would be eaten by time spent in limitConcurrency's queue — which
+// is why the body is decoded by withImageProps *before* the slot is taken,
+// not by the handler after it. IdleTimeout bounds a kept-alive connection
+// between requests; the firmware sends one request per wake and then sleeps,
+// so nothing legitimate sits idle.
 const (
 	readHeaderTimeout = 10 * time.Second
 	readTimeout       = 15 * time.Second
@@ -240,6 +245,35 @@ func decodeImageProps(w http.ResponseWriter, r *http.Request) (ImageProperties, 
 	return imageProps, true
 }
 
+// imagePropsKey is the request-context key withImageProps stores the decoded
+// body under.
+type imagePropsKey struct{}
+
+// withImageProps decodes and validates the request body before the request
+// reaches limitConcurrency, and hands the result to the handler through the
+// request context. The order is the point: the body read is under the server's
+// read deadline, which starts ticking when the request line arrives, so
+// reading it *after* queueing for a conversion slot would turn a busy server
+// into a 400 for whichever frame waited longest. Decoding first also means a
+// client that trickles its body in never occupies one of the two slots, and a
+// malformed request is refused without waiting for one at all.
+func withImageProps(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		imageProps, ok := decodeImageProps(w, r)
+		if !ok {
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), imagePropsKey{}, imageProps)))
+	})
+}
+
+// requestImageProps returns the body withImageProps decoded. Only reachable
+// behind that middleware — newRouter wires it — so a missing value is a
+// programming error, not a client one, and the panic is the right answer.
+func requestImageProps(r *http.Request) ImageProperties {
+	return r.Context().Value(imagePropsKey{}).(ImageProperties)
+}
+
 // writeImage answers with the nibble-packed panel bytes.
 //
 // The Content-Type is not a formality. Without one Go sniffs the body, and a
@@ -255,10 +289,7 @@ func writeImage(w http.ResponseWriter, data []byte) {
 }
 
 func calibrationImage(w http.ResponseWriter, r *http.Request) {
-	imageProps, ok := decodeImageProps(w, r)
-	if !ok {
-		return
-	}
+	imageProps := requestImageProps(r)
 
 	data, err := GenerateCalibrationImage(imageProps.Width, imageProps.Height, imageProps.ColorSpace)
 	if err != nil {
@@ -273,10 +304,7 @@ func calibrationImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func clearImage(w http.ResponseWriter, r *http.Request) {
-	imageProps, ok := decodeImageProps(w, r)
-	if !ok {
-		return
-	}
+	imageProps := requestImageProps(r)
 
 	data, err := GenerateClearImage(imageProps.Width, imageProps.Height, imageProps.ColorSpace)
 	if err != nil {
@@ -291,10 +319,7 @@ func clearImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func fetchImage(w http.ResponseWriter, r *http.Request) {
-	imageProps, ok := decodeImageProps(w, r)
-	if !ok {
-		return
-	}
+	imageProps := requestImageProps(r)
 
 	// The client is gone; don't burn a conversion slot on a picture nobody will
 	// read.
@@ -340,6 +365,9 @@ func newRouter() *chi.Mux {
 	// that, so wiring a middleware in here fails a test rather than silently
 	// changing the contract the firmware was built against.
 	router.Group(func(r chi.Router) {
+		// Body first, slot second — see withImageProps for why the order
+		// matters. TestBodyIsDecodedBeforeQueueing pins it.
+		r.Use(withImageProps)
 		r.Use(limitConcurrency)
 		r.Post("/fetchImage", fetchImage)
 		r.Post("/calibrationImage", calibrationImage)
@@ -408,9 +436,6 @@ func main() {
 		imageSource = fallbackSource{primary: immich, fallback: local}
 		log.Printf("image sources: Immich at %s (%s), falling back to %q", immich.baseURL, immich.albumDescription(), imageDir)
 	}
-
-	// Seed once at startup rather than on every draw.
-	rand.Seed(time.Now().UnixNano())
 
 	addr := net.JoinHostPort(bind, port)
 	server := &http.Server{
