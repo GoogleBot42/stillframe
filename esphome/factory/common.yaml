@@ -20,9 +20,11 @@
 substitutions:
   firmware_version: dev
 
-# The adoptable config for this variant. ESPHome resolves an `!include` whose
-# path contains substitutions during the substitution pass, so `${variant}`
-# works here.
+# The adoptable config for this variant. A package's `!include` path may
+# contain substitutions: config.py runs do_packages_pass BEFORE
+# do_substitution_pass, and the packages pass resolves the include itself,
+# seeding its context from the including file's root `substitutions:`. So
+# `${variant}` is in scope here.
 packages:
   device: !include ../${variant}.yaml
 

@@ -26,8 +26,8 @@
 #   https://googlebot42.github.io/stillframe/firmware/<variant>/<name>.ota.bin
 #
 #   Those Pages URLs are STABLE — they always serve the newest stable release,
-#   which is why the `update:` component in esphome/factory/*.yaml can hard-code
-#   them. The same files are also attached to the GitHub Release for the tag, as
+#   which is why the `update:` component in esphome/factory/common.yaml can
+#   bake them in (as `.../firmware/${variant}/manifest.json`). The same files are also attached to the GitHub Release for the tag, as
 #   a permanent per-version archive; devices do not use them (release asset URLs
 #   redirect through long signed links that overflow the ESPHome HTTP client's
 #   buffer).
