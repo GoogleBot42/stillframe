@@ -91,6 +91,43 @@ func TestCalibrationImageHandler(t *testing.T) {
 	}
 }
 
+// Every successful response is nibble-packed panel data, and none of it is
+// text. Left unset, net/http sniffs the body — a bright 16-gray frame really
+// does come back text/plain; charset=utf-8 — which invites any proxy in front
+// of this server to rewrite or recompress the bytes the firmware clocks
+// straight out to the panel.
+func TestHandlersDeclareOctetStream(t *testing.T) {
+	silenceStdout(t)
+	imgDir := t.TempDir()
+	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
+	withImageDir(t, imgDir)
+
+	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
+		t.Run(ep, func(t *testing.T) {
+			rec := postJSON(t, ep, ImageProperties{Width: 40, Height: 24, ColorSpace: epd7in3fPalette})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/octet-stream" {
+				t.Errorf("Content-Type %q, want application/octet-stream", got)
+			}
+		})
+	}
+}
+
+// The same, for the palette that provoked the mis-sniff: an all-white 16-gray
+// clear image is a run of 0xFF bytes, which is valid UTF-8.
+func TestClearImageDeclaresOctetStreamForGrey16(t *testing.T) {
+	silenceStdout(t)
+	rec := postJSON(t, "/clearImage", ImageProperties{Width: 64, Height: 32, ColorSpace: grey16Palette()})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/octet-stream" {
+		t.Errorf("Content-Type %q, want application/octet-stream", got)
+	}
+}
+
 func TestClearImageHandlerReturnsUniformColor(t *testing.T) {
 	silenceStdout(t)
 	const w, h = 40, 24
@@ -1183,56 +1220,11 @@ func TestImageCandidatesSingleFileStillServedAfterBeingServed(t *testing.T) {
 	}
 }
 
-// ===========================================================================
-// basicAuth middleware (currently not wired up in main())
-// ===========================================================================
-
-func TestBasicAuthRejectsMissingCredentials(t *testing.T) {
-	h := basicAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
-	}))
-	req := httptest.NewRequest(http.MethodPost, "/fetchImage", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("status %d, want 401", rec.Code)
-	}
-}
-
-func TestBasicAuthRejectsWrongCredentials(t *testing.T) {
-	h := basicAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
-	}))
-	for _, c := range [][2]string{{"username", "wrong"}, {"wrong", "password"}, {"", ""}} {
-		req := httptest.NewRequest(http.MethodPost, "/fetchImage", nil)
-		req.SetBasicAuth(c[0], c[1])
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("%v: status %d, want 401", c, rec.Code)
-		}
-	}
-}
-
-func TestBasicAuthAcceptsHardcodedCredentials(t *testing.T) {
-	// NOTE: the credentials are hard-coded to username/password in main.go:119.
-	// The middleware is deliberately not wired up (main.go:146 comments out
-	// r.Use(basicAuth)), so this only documents the helper.
-	h := basicAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
-	}))
-	req := httptest.NewRequest(http.MethodPost, "/fetchImage", nil)
-	req.SetBasicAuth("username", "password")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
-		t.Errorf("status %d body %q, want 200 'ok'", rec.Code, rec.Body.String())
-	}
-}
-
-// Documents the current posture: basicAuth is deliberately not wired into
-// newRouter, so no endpoint is authenticated. This exercises the production
-// router, so wiring auth in would fail here rather than pass silently.
+// Documents the current posture: no authentication middleware is wired into
+// newRouter, so no endpoint is authenticated — the firmware's "Server Auth
+// Header" is sent but never read, and enforcing it is a reverse proxy's job
+// (see README.md). This exercises the production router, so wiring auth in
+// would fail here rather than pass silently.
 func TestRoutesAreUnauthenticated(t *testing.T) {
 	silenceStdout(t)
 	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
@@ -1272,5 +1264,43 @@ func TestRouterExposesExactlyTheThreeEndpoints(t *testing.T) {
 		if !want[route] {
 			t.Errorf("router exposes an unexpected route %q", route)
 		}
+	}
+}
+
+// ===========================================================================
+// Command line
+// ===========================================================================
+
+// service.nix interpolates `server <port> <imgDir>` by position, so the
+// positional form has to keep working exactly as it did before -bind existed —
+// and -bind has to be usable in front of it.
+func TestParseArgs(t *testing.T) {
+	const (
+		defPort = "8080"
+		defDir  = "./img"
+	)
+	cases := []struct {
+		name               string
+		args               []string
+		bind, port, imgDir string
+	}{
+		{"no arguments", nil, "0.0.0.0", defPort, defDir},
+		{"port only", []string{"18450"}, "0.0.0.0", "18450", defDir},
+		{"the service.nix form", []string{"18450", "/var/lib/stillframe-server/images"}, "0.0.0.0", "18450", "/var/lib/stillframe-server/images"},
+		{"bind before the positionals", []string{"-bind", "127.0.0.1", "18450", "/imgs"}, "127.0.0.1", "18450", "/imgs"},
+		{"bind as --flag=value", []string{"--bind=100.64.0.1", "18450"}, "100.64.0.1", "18450", defDir},
+		{"a directory with a space", []string{"18450", "/srv/my photos"}, "0.0.0.0", "18450", "/srv/my photos"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			bind, port, imgDir, err := parseArgs(c.args, defPort, defDir)
+			if err != nil {
+				t.Fatalf("parseArgs(%q): %v", c.args, err)
+			}
+			if bind != c.bind || port != c.port || imgDir != c.imgDir {
+				t.Errorf("got bind=%q port=%q imgDir=%q, want %q/%q/%q",
+					bind, port, imgDir, c.bind, c.port, c.imgDir)
+			}
+		})
 	}
 }

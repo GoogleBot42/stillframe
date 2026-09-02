@@ -268,8 +268,9 @@ func withImageSource(t *testing.T, src ImageSource) {
 	t.Cleanup(func() { imageSource = old })
 }
 
-// silenceStdout redirects os.Stdout for the duration of the test; the handlers
-// are chatty with fmt.Printf.
+// silenceStdout redirects os.Stdout for the duration of the test. The handlers
+// log through the standard logger, which TestMain has already discarded; this
+// covers anything that writes to stdout directly.
 func silenceStdout(t *testing.T) {
 	t.Helper()
 	old := os.Stdout

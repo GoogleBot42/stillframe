@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -90,6 +92,41 @@ const maxBodyBytes = 16 << 10
 // timeout, and a client that gives up waiting frees its place without ever
 // having allocated anything.
 const maxConcurrentRequests = 2
+
+// The http.Server timeouts. http.ListenAndServe applies none of these, which
+// leaves a frame that drops off WiFi mid-request holding a goroutine (and its
+// buffers) until the process restarts, and makes Slowloris a one-line attack
+// on an endpoint that authenticates nobody.
+//
+// The write deadline is the one that has to be reasoned about rather than
+// picked, because it bounds the whole handler, not just the socket write. The
+// worst case a legitimate /fetchImage can take is, in order:
+//
+//   - up to maxConcurrentRequests-1 conversions ahead of it in
+//     limitConcurrency's queue (this deadline is set before the handler runs,
+//     so queueing counts against it);
+//   - the Immich download, itself bounded by immichTimeout (30 s), plus the
+//     local-directory fallback retrying past undecodable files if Immich
+//     fails;
+//   - the conversion: face detection, Lanczos3 resize, CIEDE2000 nearest-color
+//     mapping and Floyd-Steinberg dithering of an image up to maxPixels
+//     (4 Mpx). On a Pi-class CPU that is the tens-of-seconds part.
+//
+// 180 s is comfortably above the sum of those and still an order of magnitude
+// below "forever". A frame that hits it gets a truncated body and retries on
+// its next wake, which is exactly what it does for any other failed refresh.
+//
+// The read deadlines can be short because the request body is capped at
+// maxBodyBytes (16 KiB): no honest client needs 15 s to send under a kilobyte
+// of JSON, and ReadHeaderTimeout is what actually stops Slowloris. IdleTimeout
+// bounds a kept-alive connection between requests; the firmware sends one
+// request per wake and then sleeps, so nothing legitimate sits idle.
+const (
+	readHeaderTimeout = 10 * time.Second
+	readTimeout       = 15 * time.Second
+	writeTimeout      = 180 * time.Second
+	idleTimeout       = 60 * time.Second
+)
 
 // imageSlots is the semaphore limitConcurrency hands out. Buffered, so an
 // acquire is a send and a release is a receive.
@@ -203,6 +240,20 @@ func decodeImageProps(w http.ResponseWriter, r *http.Request) (ImageProperties, 
 	return imageProps, true
 }
 
+// writeImage answers with the nibble-packed panel bytes.
+//
+// The Content-Type is not a formality. Without one Go sniffs the body, and a
+// packed image is just bytes: a bright 16-gray frame measurably sniffs as
+// text/plain; charset=utf-8, which is an invitation for any reverse proxy in
+// front of this server to transcode, recompress or otherwise rewrite what the
+// firmware then clocks straight out to the panel. Declaring the body opaque is
+// the whole fix.
+func writeImage(w http.ResponseWriter, data []byte) {
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Write(data)
+}
+
 func calibrationImage(w http.ResponseWriter, r *http.Request) {
 	imageProps, ok := decodeImageProps(w, r)
 	if !ok {
@@ -215,10 +266,10 @@ func calibrationImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Printf("Bytes to send: %+v\n", len(data))
+	log.Printf("calibrationImage: %dx%d, %d colors, %d bytes",
+		imageProps.Width, imageProps.Height, len(imageProps.ColorSpace), len(data))
 
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.Write(data)
+	writeImage(w, data)
 }
 
 func clearImage(w http.ResponseWriter, r *http.Request) {
@@ -233,10 +284,10 @@ func clearImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Printf("Bytes to send: %+v\n", len(data))
+	log.Printf("clearImage: %dx%d, %d colors, %d bytes",
+		imageProps.Width, imageProps.Height, len(imageProps.ColorSpace), len(data))
 
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.Write(data)
+	writeImage(w, data)
 }
 
 func fetchImage(w http.ResponseWriter, r *http.Request) {
@@ -251,12 +302,6 @@ func fetchImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Now you can access the fields of imageProps, e.g.:
-	fmt.Printf("Received request for an image with width: %d, height: %d\n", imageProps.Width, imageProps.Height)
-	for _, color := range imageProps.ColorSpace {
-		fmt.Printf("Color code: %d, RGB: %v\n", color.Code, color.Color)
-	}
-
 	img, randomImgFile, err := imageSource.NextImage(r.Context())
 	if err != nil {
 		// With Immich configured this is the error from the *fallback*: the
@@ -266,27 +311,18 @@ func fetchImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no image available", http.StatusInternalServerError)
 		return
 	}
-	fmt.Println("Serving random image file:", randomImgFile)
 
 	flippedImage := flipImage(img, imageProps.FlipVertical, imageProps.FlipHorizonal)
 	bestCrop := GetBestPieceOfImage(imageProps.Width, imageProps.Height, flippedImage)
 	data := ConvertToEInkImage(bestCrop, imageProps.ColorSpace)
 
-	fmt.Printf("Bytes to send: %+v\n", len(data))
+	// One line per request, not one per palette entry: a frame that wakes every
+	// few minutes with a 16-entry palette used to write seventeen lines into
+	// journald for a refresh nobody was watching.
+	log.Printf("fetchImage: %dx%d, %d colors, %q, %d bytes",
+		imageProps.Width, imageProps.Height, len(imageProps.ColorSpace), randomImgFile, len(data))
 
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.Write(data)
-}
-
-func basicAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		username, password, ok := r.BasicAuth()
-		if !ok || username != "username" || password != "password" {
-			http.Error(w, "Unauthorized.", 401)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	writeImage(w, data)
 }
 
 // newRouter builds the server's routing table. main() and the tests both use it
@@ -299,8 +335,11 @@ func newRouter() *chi.Mux {
 	router.Use(middleware.Logger)
 	router.Use(middleware.Recoverer)
 
+	// The endpoints are deliberately unauthenticated; enforcing auth is the
+	// reverse proxy's job (see README.md). TestRoutesAreUnauthenticated pins
+	// that, so wiring a middleware in here fails a test rather than silently
+	// changing the contract the firmware was built against.
 	router.Group(func(r chi.Router) {
-		// r.Use(basicAuth)
 		r.Use(limitConcurrency)
 		r.Post("/fetchImage", fetchImage)
 		r.Post("/calibrationImage", calibrationImage)
@@ -310,16 +349,46 @@ func newRouter() *chi.Mux {
 	return router
 }
 
-func main() {
-	if len(os.Args) > 1 {
-		port = os.Args[1]
+// parseArgs reads the command line — everything after the program name.
+//
+// The bind address is a flag rather than a third positional argument because
+// `server <port> [imgDir]` is the form server/service.nix interpolates and
+// every deployed unit already runs; a NixOS module people have deployed is not
+// something to break for an option most installs will leave alone. Go's flag
+// package stops parsing at the first non-flag argument, so both
+// `server 8080 /imgs` and `server -bind 127.0.0.1 8080 /imgs` mean what they
+// look like. (Anything flag-shaped *after* the port is therefore a positional,
+// not a flag — fine while -bind is the only one, and the reason a second flag
+// would need this comment revisited.)
+//
+// Defaults are passed in rather than read from the package variables so that a
+// test can call this without disturbing them.
+func parseArgs(args []string, defaultPort, defaultImgDir string) (bind, port, imgDir string, err error) {
+	fs := flag.NewFlagSet("server", flag.ContinueOnError)
+	bindFlag := fs.String("bind", "0.0.0.0", "address to listen on (0.0.0.0 for every interface, 127.0.0.1 for loopback only, or a specific address such as a Tailscale one)")
+	if err := fs.Parse(args); err != nil {
+		return "", "", "", err
 	}
-	fmt.Println("Starting on port: ", port)
 
-	if len(os.Args) > 2 {
-		imageDir = os.Args[2]
+	port, imgDir = defaultPort, defaultImgDir
+	rest := fs.Args()
+	if len(rest) > 0 {
+		port = rest[0]
 	}
-	fmt.Println("Choosing images from: ", imageDir)
+	if len(rest) > 1 {
+		imgDir = rest[1]
+	}
+	return *bindFlag, port, imgDir, nil
+}
+
+func main() {
+	bind, parsedPort, parsedImgDir, err := parseArgs(os.Args[1:], port, imageDir)
+	if err != nil {
+		// flag.ContinueOnError has already printed the error and the usage.
+		os.Exit(2)
+	}
+	port, imageDir = parsedPort, parsedImgDir
+	log.Printf("serving images from %q", imageDir)
 
 	// The image source is chosen from the environment rather than from more
 	// positional arguments: server/service.nix interpolates the port and the
@@ -333,16 +402,22 @@ func main() {
 		log.Printf("warning: ignoring the Immich configuration (%v); serving only from %q", err, imageDir)
 	} else if immich != nil {
 		imageSource = fallbackSource{primary: immich, fallback: local}
-		fmt.Printf("Image sources: Immich at %s (%s), falling back to %s\n", immich.baseURL, immich.albumDescription(), imageDir)
+		log.Printf("image sources: Immich at %s (%s), falling back to %q", immich.baseURL, immich.albumDescription(), imageDir)
 	}
 
 	// Seed once at startup rather than on every draw.
 	rand.Seed(time.Now().UnixNano())
 
-	router := newRouter()
+	addr := net.JoinHostPort(bind, port)
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           newRouter(),
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
 
-	fmt.Println("Started server")
-
-	// Start the HTTP server
-	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, router))
+	log.Printf("listening on %s", addr)
+	log.Fatal(server.ListenAndServe())
 }
