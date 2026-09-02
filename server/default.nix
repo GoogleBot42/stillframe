@@ -10,7 +10,7 @@
 
     src = ./.;
 
-    vendorHash = "sha256-xCHnf4x15xB9mqVYAH7qHWTvoWafLavTJXeAV8VagHs=";
+    vendorHash = "sha256-Vec4eTlyQP4knh0JmAijKIyr6ZT3JLeMMT+DSvGibbE=";
 
     meta.mainProgram = "server";
   };
