@@ -1,6 +1,6 @@
 { overlay }:
 
-{ config, pkgs, lib, ... }:
+{ config, pkgs, lib, utils, ... }:
 let
   cfg = config.services.stillframe-server;
   # The state directory systemd creates and hands the unit when imgDir is not
@@ -105,16 +105,20 @@ in
       after = [ "network.target" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
-        # Every interpolated value goes through escapeShellArg: systemd splits
-        # ExecStart on whitespace, so an imgDir containing a space used to
-        # arrive as two arguments and the server would serve the first half of
-        # the path. (escapeShellArg adds quotes only where they are needed, so
-        # the ordinary case renders exactly as it always did.)
-        ExecStart = lib.concatStringsSep " " [
-          "${pkgs.stillframe.server}/bin/server"
-          "-bind ${lib.escapeShellArg cfg.bindAddress}"
-          (lib.escapeShellArg (toString cfg.port))
-          (lib.escapeShellArg imgDir)
+        # escapeSystemdExecArgs, not escapeShellArg: systemd's own quoting is
+        # not the shell's. It splits ExecStart on whitespace — so an imgDir
+        # containing a space used to arrive as two arguments and the server
+        # served the first half of the path — but it also expands "%" specifiers
+        # and "$VAR" references, inside quotes as well as out. A path like
+        # /srv/2024%best would silently become the boot ID (or fail the unit
+        # outright on an unknown specifier), and one containing "$" would lose
+        # the rest of the word. escapeSystemdExecArgs handles all three: it
+        # quotes, and it doubles "%" and "$" into their literal forms.
+        ExecStart = "${pkgs.stillframe.server}/bin/server " + utils.escapeSystemdExecArgs [
+          "-bind"
+          cfg.bindAddress
+          (toString cfg.port)
+          imgDir
         ];
         # Only when we are the ones inventing the directory. An operator-supplied
         # imgDir is left entirely alone: no state directory is conjured up
@@ -162,11 +166,13 @@ in
         # RLIMIT_NOFILE with setrlimit at start-up, which lives in that set, and
         # a blocked call here is a SIGSYS rather than an error return.
         SystemCallFilter = [ "@system-service" "~@privileged" ];
-        # A single conversion of a maxPixels image was measured at up to ~520 MB
-        # (see main.go), and maxConcurrentRequests allows two at once. 1G leaves
-        # the normal case — panel-sized images, a few tens of MB — an enormous
-        # margin while still turning a pathological request into a restart of
-        # this one service rather than an OOM across the whole host.
+        # main.go measured a conversion at 8 Mpx peaking around 520 MB and set
+        # maxPixels to 4 Mpx to halve that, so a request at the cap costs on the
+        # order of 260 MB and maxConcurrentRequests allows two at once. 1G is
+        # roughly twice that worst case, and vastly more than the normal one —
+        # panel-sized images, a few tens of MB. What it buys is that a
+        # pathological request restarts this one service instead of triggering
+        # the OOM killer somewhere else on the host.
         MemoryMax = "1G";
       };
     };

@@ -677,7 +677,6 @@ func TestFallbackSourceFailsWhenBothFail(t *testing.T) {
 // The end-to-end shape that matters: a frame asking for a picture while Immich
 // is down still gets a full, correctly sized frame buffer rather than a 500.
 func TestFetchImageFallsBackToTheLocalDirectory(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
 	withImageDir(t, imgDir)
@@ -698,7 +697,6 @@ func TestFetchImageFallsBackToTheLocalDirectory(t *testing.T) {
 
 // The same, over the wire from Immich itself.
 func TestFetchImageServesAnImmichAsset(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	withImageDir(t, imgDir) // deliberately empty: only Immich can answer
 	m := newImmichMock(t)

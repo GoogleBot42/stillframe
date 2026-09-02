@@ -16,12 +16,23 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
-// TestMain silences the standard logger: chi's Logger middleware and the
-// handlers' own diagnostics would otherwise bury the test output.
+// TestMain silences the two loggers that would otherwise bury the test output:
+// the standard one, which the handlers write their per-request line to, and
+// chi's request logger.
+//
+// The second needs its own line. middleware.Logger delegates to
+// middleware.DefaultLogger, which chi builds in its own init() around
+// os.Stdout — captured then and there, so neither log.SetOutput nor reassigning
+// the os.Stdout variable afterwards has any effect on it. Replacing the whole
+// logger is what actually works.
 func TestMain(m *testing.M) {
 	log.SetOutput(io.Discard)
+	middleware.DefaultLogger = middleware.RequestLogger(
+		&middleware.DefaultLogFormatter{Logger: log.New(io.Discard, "", 0)},
+	)
 	os.Exit(m.Run())
 }
 
@@ -266,21 +277,4 @@ func withImageSource(t *testing.T, src ImageSource) {
 	old := imageSource
 	imageSource = src
 	t.Cleanup(func() { imageSource = old })
-}
-
-// silenceStdout redirects os.Stdout for the duration of the test. The handlers
-// log through the standard logger, which TestMain has already discarded; this
-// covers anything that writes to stdout directly.
-func silenceStdout(t *testing.T) {
-	t.Helper()
-	old := os.Stdout
-	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		return
-	}
-	os.Stdout = devnull
-	t.Cleanup(func() {
-		os.Stdout = old
-		devnull.Close()
-	})
 }

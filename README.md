@@ -87,8 +87,9 @@ That is deliberate rather than an oversight: auth belongs to whatever is in
 front of the server. If the server is reachable from outside the LAN, put a
 reverse proxy in front of it that actually enforces the header (or a client
 certificate, or your SSO), and set the frame's "Server Auth Header" to whatever
-that proxy expects. Otherwise keep it on a trusted network — `bindAddress` is
-there to help: loopback plus a proxy, or a tailnet address.
+that proxy expects. Otherwise keep it on a trusted network — `-bind`
+(`bindAddress` in the NixOS module) is there to help: loopback plus a proxy, or
+a tailnet address.
 
 ### Immich
 

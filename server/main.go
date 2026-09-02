@@ -384,7 +384,11 @@ func parseArgs(args []string, defaultPort, defaultImgDir string) (bind, port, im
 func main() {
 	bind, parsedPort, parsedImgDir, err := parseArgs(os.Args[1:], port, imageDir)
 	if err != nil {
-		// flag.ContinueOnError has already printed the error and the usage.
+		// flag.ContinueOnError has already printed the usage, and the error
+		// too unless the "error" was someone asking for -h.
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
 		os.Exit(2)
 	}
 	port, imageDir = parsedPort, parsedImgDir

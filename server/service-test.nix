@@ -18,17 +18,23 @@ simpleTest {
     # ProtectSystem=strict has to keep readable — the daemon may not write here,
     # but it must be able to walk it.
     #
-    # The space in the name is deliberate. Before ExecStart quoted its
-    # arguments, systemd split this path in two and the server was handed
-    # "/srv/my" as its image directory.
+    # Every character in the name is deliberate, because each one is a way
+    # ExecStart used to mangle a path: the space split it into two arguments
+    # (the server was handed "/srv/my"), "%" is a systemd specifier — "%p" here
+    # would have expanded to the unit name — and "$" starts an environment
+    # substitution, which systemd performs inside quotes as well as out.
+    #
+    # ("%%" in the tmpfiles rules below is how *that* parser spells a literal
+    # "%"; the paths it creates are the ones named in services.stillframe-server
+    # and in the assertions.)
     systemd.tmpfiles.rules = [
-      "d '/srv/my photos' 0755 root root -"
-      "f '/srv/my photos/notes.txt' 0644 root root - hello"
+      "d '/srv/%%pics $set' 0755 root root -"
+      "f '/srv/%%pics $set/my notes.txt' 0644 root root - hello"
     ];
 
     services.stillframe-server = {
       enable = true;
-      imgDir = "/srv/my photos";
+      imgDir = "/srv/%pics $set";
     };
   };
 
@@ -97,11 +103,11 @@ simpleTest {
       def argv(node):
           """The running server's argv, from /proc/<pid>/cmdline.
 
-          This, not the text of ExecStart=, is what the quoting has to get
-          right: systemd splits that line on whitespace, and only the argv the
-          process actually received proves a path containing a space survived
-          in one piece. (lib.escapeShellArg adds quotes only where they are
-          needed, so the ExecStart text itself is not a fixed string.)
+          This, not the text of ExecStart=, is what the escaping has to get
+          right. Only the argv the process actually received shows whether the
+          path survived systemd's word splitting, its "%" specifiers and its
+          "$" substitution — the ExecStart text still contains the escapes at
+          that point, so matching against it would prove nothing.
           """
           pid = node.succeed(
               "systemctl show -p MainPID --value stillframe-server"
@@ -172,6 +178,25 @@ simpleTest {
               )
 
 
+      def assert_walked_imgdir(node, path):
+          """The daemon read imgDir rather than being locked out of it.
+
+          A 500 from /fetchImage proves nothing on its own: a directory with
+          nothing decodable in it and a directory the sandbox made unreachable
+          look identical from outside. This looks for source.go's per-candidate
+          log line instead, which is only reached after the directory has been
+          listed and the file opened — so it pins both that ProtectSystem=strict
+          leaves an operator's imgDir readable and that the path survived
+          ExecStart in one piece.
+          """
+          node.succeed(
+              "journalctl -u stillframe-server --no-pager | "
+              + "grep -F {}".format(
+                  "'skipping unusable image \"" + path + "\"'"
+              )
+          )
+
+
       start_all()
 
       for node in (machine, imgless):
@@ -182,15 +207,17 @@ simpleTest {
       check_serves(machine, "imgDir set")
       check_serves(imgless, "imgDir unset")
 
+      with subtest("the sandbox leaves an operator's imgDir readable"):
+          assert_walked_imgdir(machine, "/srv/%pics $set/my notes.txt")
+
       # An operator-supplied imgDir is served straight from that path, with no
-      # state directory conjured up behind their back — and every argument is
-      # shell-escaped, so a directory whose name contains a space reaches the
-      # process as one argument instead of two.
+      # state directory conjured up behind their back — and it reaches the
+      # process character for character, space, "%" and "$" included.
       with subtest("imgDir set leaves the unit untouched"):
           exec_start(machine)  # exactly one ExecStart=
           got = argv(machine)
           assert got[0].endswith("/bin/server"), "unexpected argv: {!r}".format(got)
-          assert got[1:] == ["-bind", "0.0.0.0", "18450", "/srv/my photos"], (
+          assert got[1:] == ["-bind", "0.0.0.0", "18450", "/srv/%pics $set"], (
               "unexpected argv: {!r}".format(got)
           )
           state = machine.succeed(
