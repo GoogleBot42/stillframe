@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"image"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"os"
@@ -121,7 +120,7 @@ var decodableExtensions = map[string]bool{
 // and it must not be unreachable just because one .jpg in the directory happens
 // to be corrupt.
 func imageCandidates(dir string, last string) ([]string, error) {
-	entries, err := ioutil.ReadDir(dir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}

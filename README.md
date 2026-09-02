@@ -64,12 +64,32 @@ strand itself; once adopted it sleeps on schedule even if HA is down.
 
 ```bash
 nix build .#server
-./result/bin/server 8080 /path/to/images   # args optional: port, image dir
+./result/bin/server 8080 /path/to/images                  # args optional: port, image dir
+./result/bin/server -bind 127.0.0.1 8080 /path/to/images  # listen on loopback only
 ```
 
+`-bind` defaults to `0.0.0.0` (every interface). Set it to `127.0.0.1` to be
+reachable only through a reverse proxy on the same host, or to a specific
+interface address — a Tailscale address, say — to serve the tailnet and nobody
+else.
+
 Or as a NixOS service via the flake's `nixosModules.default` (see
-`server/service.nix` for options: port, optional image directory, user/group,
-environment file).
+`server/service.nix` for options: port, bind address, optional image directory,
+user/group, environment file).
+
+### A note on authentication
+
+The server does not authenticate anything. All three endpoints are open, and
+the "Server Auth Header" the firmware sends as an `Authorization` header is
+never read — setting it protects nothing on its own.
+
+That is deliberate rather than an oversight: auth belongs to whatever is in
+front of the server. If the server is reachable from outside the LAN, put a
+reverse proxy in front of it that actually enforces the header (or a client
+certificate, or your SSO), and set the frame's "Server Auth Header" to whatever
+that proxy expects. Otherwise keep it on a trusted network — `-bind`
+(`bindAddress` in the NixOS module) is there to help: loopback plus a proxy, or
+a tailnet address.
 
 ### Immich
 

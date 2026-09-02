@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -75,7 +76,6 @@ func postRaw(t *testing.T, path, body string) *httptest.ResponseRecorder {
 }
 
 func TestCalibrationImageHandler(t *testing.T) {
-	silenceStdout(t)
 	const w, h = 40, 24
 	rec := postJSON(t, "/calibrationImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
 
@@ -91,8 +91,42 @@ func TestCalibrationImageHandler(t *testing.T) {
 	}
 }
 
+// Every successful response is nibble-packed panel data, and none of it is
+// text. Left unset, net/http sniffs the body — a bright 16-gray frame really
+// does come back text/plain; charset=utf-8 — which invites any proxy in front
+// of this server to rewrite or recompress the bytes the firmware clocks
+// straight out to the panel.
+func TestHandlersDeclareOctetStream(t *testing.T) {
+	imgDir := t.TempDir()
+	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
+	withImageDir(t, imgDir)
+
+	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
+		t.Run(ep, func(t *testing.T) {
+			rec := postJSON(t, ep, ImageProperties{Width: 40, Height: 24, ColorSpace: epd7in3fPalette})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/octet-stream" {
+				t.Errorf("Content-Type %q, want application/octet-stream", got)
+			}
+		})
+	}
+}
+
+// The same, for the palette that provoked the mis-sniff: an all-white 16-gray
+// clear image is a run of 0xFF bytes, which is valid UTF-8.
+func TestClearImageDeclaresOctetStreamForGrey16(t *testing.T) {
+	rec := postJSON(t, "/clearImage", ImageProperties{Width: 64, Height: 32, ColorSpace: grey16Palette()})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/octet-stream" {
+		t.Errorf("Content-Type %q, want application/octet-stream", got)
+	}
+}
+
 func TestClearImageHandlerReturnsUniformColor(t *testing.T) {
-	silenceStdout(t)
 	const w, h = 40, 24
 	rec := postJSON(t, "/clearImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
 
@@ -117,7 +151,6 @@ func TestClearImageHandlerReturnsUniformColor(t *testing.T) {
 }
 
 func TestClearImageHandlerColorIsWhite(t *testing.T) {
-	silenceStdout(t)
 	rec := postJSON(t, "/clearImage", ImageProperties{Width: 8, Height: 4, ColorSpace: epd7in3fPalette})
 	white := epd7in3fPalette[1].Code
 	if want := white<<4 | white; rec.Body.Bytes()[0] != want {
@@ -126,7 +159,6 @@ func TestClearImageHandlerColorIsWhite(t *testing.T) {
 }
 
 func TestHandlersRejectMalformedJSON(t *testing.T) {
-	silenceStdout(t)
 	endpoints := []string{"/fetchImage", "/calibrationImage", "/clearImage"}
 	bodies := map[string]string{
 		"garbage":            "not json",
@@ -165,7 +197,6 @@ func TestHandlersRejectNonPost(t *testing.T) {
 // GenerateCalibrationImage and index out of range in GenerateClearImage, leaving
 // chi's Recoverer to turn an untrusted body into a 500. It is a bad request.
 func TestHandlersRejectEmptyColorSpace(t *testing.T) {
-	silenceStdout(t)
 	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
 		t.Run(ep, func(t *testing.T) {
 			rec := postJSON(t, ep, ImageProperties{Width: 8, Height: 4, ColorSpace: ColorSpace{}})
@@ -179,7 +210,6 @@ func TestHandlersRejectEmptyColorSpace(t *testing.T) {
 // Degenerate and absurd dimensions are rejected before they reach the pipeline,
 // where they used to divide by zero or allocate unboundedly.
 func TestHandlersRejectOutOfRangeDimensions(t *testing.T) {
-	silenceStdout(t)
 	cases := map[string]ImageProperties{
 		"zero size":       {Width: 0, Height: 0, ColorSpace: epd7in3fPalette},
 		"zero width":      {Width: 0, Height: 4, ColorSpace: epd7in3fPalette},
@@ -203,7 +233,6 @@ func TestHandlersRejectOutOfRangeDimensions(t *testing.T) {
 
 // The largest shipped panel must stay inside the accepted range.
 func TestHandlersAcceptTheLargestShippedGeometry(t *testing.T) {
-	silenceStdout(t)
 	rec := postJSON(t, "/clearImage", ImageProperties{Width: 1872, Height: 1404, ColorSpace: grey16Palette()})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
@@ -235,7 +264,6 @@ func paletteOfSize(n int) ColorSpace {
 // and the cap is never reached unless the handler insists the object is the
 // whole body.
 func TestHandlersRejectOversizeBody(t *testing.T) {
-	silenceStdout(t)
 	const valid = `{"width":8,"height":4,"color_space":[{"color_code":0,"rgb_color":[0,0,0]}]`
 	padding := strings.Repeat("x", maxBodyBytes)
 	bodies := map[string]string{
@@ -257,7 +285,6 @@ func TestHandlersRejectOversizeBody(t *testing.T) {
 // A second JSON value after the first is not a frame talking; it is the shape
 // a body-cap bypass takes, so it is a bad request even when it is small.
 func TestHandlersRejectTrailingContent(t *testing.T) {
-	silenceStdout(t)
 	const valid = `{"width":8,"height":4,"color_space":[{"color_code":0,"rgb_color":[0,0,0]}]}`
 	bodies := map[string]string{
 		"second object": valid + valid,
@@ -282,7 +309,6 @@ func TestHandlersRejectTrailingContent(t *testing.T) {
 // 10000x10000 answered 200 with a 50 MB body and ~350 MiB of heap, enough to
 // OOM the 256 MiB service VM.
 func TestHandlersRejectTooManyPixels(t *testing.T) {
-	silenceStdout(t)
 	cases := map[string]ImageProperties{
 		"square":     {Width: maxDimension, Height: maxDimension, ColorSpace: epd7in3fPalette},
 		"just over":  {Width: 4000, Height: maxPixels/4000 + 1, ColorSpace: epd7in3fPalette},
@@ -302,7 +328,6 @@ func TestHandlersRejectTooManyPixels(t *testing.T) {
 
 // The cap itself is still served — it is a bound, not a panel list.
 func TestClearImageAcceptsTheMaximumPixelCount(t *testing.T) {
-	silenceStdout(t)
 	const w, h = 4000, maxPixels / 4000
 	rec := postJSON(t, "/clearImage", ImageProperties{Width: w, Height: h, ColorSpace: epd7in3fPalette})
 	if rec.Code != http.StatusOK {
@@ -316,7 +341,6 @@ func TestClearImageAcceptsTheMaximumPixelCount(t *testing.T) {
 // The nearest-color search is linear in the palette, so an unbounded
 // color_space is a CPU amplifier even when the body itself is small.
 func TestHandlersRejectOversizeColorSpace(t *testing.T) {
-	silenceStdout(t)
 	props := ImageProperties{Width: 8, Height: 4, ColorSpace: paletteOfSize(maxColorSpaceEntries + 1)}
 	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
 		t.Run(ep, func(t *testing.T) {
@@ -329,7 +353,6 @@ func TestHandlersRejectOversizeColorSpace(t *testing.T) {
 }
 
 func TestHandlersAcceptTheLargestAllowedColorSpace(t *testing.T) {
-	silenceStdout(t)
 	rec := postJSON(t, "/calibrationImage", ImageProperties{Width: 8, Height: 4, ColorSpace: paletteOfSize(maxColorSpaceEntries)})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
@@ -340,7 +363,6 @@ func TestHandlersAcceptTheLargestAllowedColorSpace(t *testing.T) {
 // nothing of its own and clobbered the neighbouring pixel instead, so a bad
 // palette produced a plausible-but-wrong image rather than an error.
 func TestHandlersRejectOutOfRangeColorCode(t *testing.T) {
-	silenceStdout(t)
 	cases := map[string]uint8{
 		"one past the nibble": maxColorCode + 1,
 		"whole byte":          0xFF,
@@ -363,7 +385,6 @@ func TestHandlersRejectOutOfRangeColorCode(t *testing.T) {
 // 5, 300 -> 212, 1e9 -> 0 — so an out-of-range channel silently matches pixels
 // against a color nobody asked for.
 func TestHandlersRejectOutOfRangeRGBColor(t *testing.T) {
-	silenceStdout(t)
 	cases := map[string]Colorf{
 		"negative":       {-5, 0, 0},
 		"slightly under": {0, -0.0001, 0},
@@ -387,7 +408,6 @@ func TestHandlersRejectOutOfRangeRGBColor(t *testing.T) {
 // The bounds must not cost a real frame its picture: this is the byte-for-byte
 // body the EPD7IN3F driver sends.
 func TestHandlersAcceptTheFirmwareRequestBody(t *testing.T) {
-	silenceStdout(t)
 	for _, ep := range []string{"/calibrationImage", "/clearImage"} {
 		t.Run(ep, func(t *testing.T) {
 			rec := postRaw(t, ep, firmwareRequestBody)
@@ -416,7 +436,6 @@ func TestTheLargestFirmwareBodyFitsTheByteCap(t *testing.T) {
 // slot taken, a caller that has already given up is answered rather than
 // queued behind work it will never read.
 func TestImageRequestsAreConcurrencyLimited(t *testing.T) {
-	silenceStdout(t)
 	for i := 0; i < maxConcurrentRequests; i++ {
 		imageSlots <- struct{}{}
 	}
@@ -438,12 +457,40 @@ func TestImageRequestsAreConcurrencyLimited(t *testing.T) {
 	}
 }
 
+// The body must be decoded before the request queues for a conversion slot,
+// not after: the server's read deadline is armed when the request line
+// arrives, so a frame that waited in the queue longer than readTimeout would
+// otherwise have its body read fail and be answered 400 — a stale picture for
+// a whole sleep cycle, on precisely the busy morning the queue exists for.
+// With every slot held, a malformed body has to come back 400 straight away;
+// if it queued first, this request's context would expire in the queue and it
+// would be answered 503 instead.
+func TestBodyIsDecodedBeforeQueueing(t *testing.T) {
+	for i := 0; i < maxConcurrentRequests; i++ {
+		imageSlots <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < maxConcurrentRequests; i++ {
+			<-imageSlots
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/clearImage", strings.NewReader(`{"width": 0`)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	newTestRouter().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status %d, want 400 before any slot is waited for (body %q)", rec.Code, rec.Body.String())
+	}
+}
+
 // Every exit from a handler has to give the slot back — a rejected request
 // most of all, since those are the cheap ones to send in bulk. A leak here
 // wedges the server after maxConcurrentRequests bad requests, so this test
 // hangs rather than fails if the release is dropped.
 func TestConcurrencySlotsAreReleasedByRejectedRequests(t *testing.T) {
-	silenceStdout(t)
 	for i := 0; i < maxConcurrentRequests+2; i++ {
 		rec := postJSON(t, "/clearImage", ImageProperties{Width: 0, Height: 0, ColorSpace: epd7in3fPalette})
 		if rec.Code != http.StatusBadRequest {
@@ -459,7 +506,6 @@ func TestConcurrencySlotsAreReleasedByRejectedRequests(t *testing.T) {
 }
 
 func TestCalibrationImageAllShippedPalettes(t *testing.T) {
-	silenceStdout(t)
 	cases := []struct {
 		name    string
 		w, h    int
@@ -487,7 +533,6 @@ func TestCalibrationImageAllShippedPalettes(t *testing.T) {
 // ===========================================================================
 
 func TestFetchImageEndToEnd(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
 	withImageDir(t, imgDir)
@@ -519,7 +564,6 @@ func TestFetchImageEndToEnd(t *testing.T) {
 // the *image.RGBA every other handler test feeds the pipeline. The whole
 // pipeline (temp-PNG encode, crop, resize, quantize) must cope with it.
 func TestFetchImageEndToEndJPEG(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	writeTempJPEG(t, imgDir, "only.jpg", gradientRGBA(64, 48))
 	withImageDir(t, imgDir)
@@ -539,7 +583,6 @@ func TestFetchImageEndToEndJPEG(t *testing.T) {
 // start at (0,0). The crop rectangle must land inside those bounds; getting the
 // coordinate spaces wrong yields an empty intersection and a 0-byte 200 reply.
 func TestFetchImageEndToEndOffsetFrameGIF(t *testing.T) {
-	silenceStdout(t)
 
 	// The frame offset exceeds the frame size, so an untranslated crop rect
 	// intersects the frame's bounds to an empty rectangle rather than merely a
@@ -587,7 +630,6 @@ func TestFetchImageEndToEndOffsetFrameGIF(t *testing.T) {
 }
 
 func TestFetchImageIsDeterministicForAGivenImage(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
 	withImageDir(t, imgDir)
@@ -602,7 +644,6 @@ func TestFetchImageIsDeterministicForAGivenImage(t *testing.T) {
 }
 
 func TestFetchImageHonoursFlips(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	// Top half white, bottom half black: a vertical flip must swap them.
 	src := solidRGBA(64, 48, color.RGBA{255, 255, 255, 255})
@@ -636,7 +677,6 @@ func TestFetchImageHonoursFlips(t *testing.T) {
 }
 
 func TestFetchImageHonoursHorizontalFlip(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	src := solidRGBA(64, 48, color.RGBA{255, 255, 255, 255})
 	for y := 0; y < 48; y++ {
@@ -663,7 +703,6 @@ func TestFetchImageHonoursHorizontalFlip(t *testing.T) {
 // A picture with no face in it must not cost the frame its picture: the crop
 // falls back to a centered one and the response is a normal, full-length image.
 func TestFetchImageWithoutFacesStillServesAnImage(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
 	withImageDir(t, imgDir)
@@ -687,7 +726,6 @@ func TestFetchImageWithoutFacesStillServesAnImage(t *testing.T) {
 // carries an image extension so that it is drawn the way a real photo would be,
 // rather than only as the last resort a .txt would be.
 func TestFetchImageNonImageFile(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	if err := writeFile(filepath.Join(imgDir, "readme.png"), "not an image"); err != nil {
 		t.Fatal(err)
@@ -702,7 +740,6 @@ func TestFetchImageNonImageFile(t *testing.T) {
 
 // An empty image directory is a server-side problem, not a bad request.
 func TestFetchImageEmptyImageDirectory(t *testing.T) {
-	silenceStdout(t)
 	withImageDir(t, t.TempDir())
 
 	rec := postJSON(t, "/fetchImage", ImageProperties{Width: 16, Height: 8, ColorSpace: epd7in3fPalette})
@@ -719,7 +756,6 @@ func TestFetchImageEmptyImageDirectory(t *testing.T) {
 // would fail here, and pushing the last-served file to the back of the queue
 // must not push the only working file out of reach on the second request.
 func TestFetchImageRetriesPastUndecodableFiles(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	// Decodable extensions, undecodable content: exactly what a truncated or
 	// misnamed file looks like, and the only case the extension filter cannot
@@ -748,7 +784,6 @@ func TestFetchImageRetriesPastUndecodableFiles(t *testing.T) {
 // The walk must terminate: when nothing in the directory decodes, the request
 // is still a 500 (and the server stays up).
 func TestFetchImageAllCandidatesUndecodable(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	for _, name := range []string{"a.png", "b.jpg", "c.jpeg", "d.gif"} {
 		if err := writeFile(filepath.Join(imgDir, name), "not an image"); err != nil {
@@ -771,7 +806,6 @@ func TestFetchImageAllCandidatesUndecodable(t *testing.T) {
 // dotfiles never enter the draw, and an undecodable extension is only ever
 // tried after the real pictures.
 func TestFetchImageIgnoresUndecodableExtensions(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
 	for _, name := range []string{".DS_Store", "clip.mp4", "phone.heic", "readme.txt", ".only.png.tmp7"} {
@@ -797,7 +831,6 @@ func TestFetchImageIgnoresUndecodableExtensions(t *testing.T) {
 // refreshes a handful of times a day is very visible. Consecutive requests must
 // not serve the same file.
 func TestFetchImageDoesNotRepeatTheSameImageBackToBack(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	writeTempPNG(t, imgDir, "white.png", solidRGBA(64, 48, color.RGBA{255, 255, 255, 255}))
 	writeTempPNG(t, imgDir, "black.png", solidRGBA(64, 48, color.RGBA{0, 0, 0, 255}))
@@ -826,7 +859,6 @@ func TestFetchImageDoesNotRepeatTheSameImageBackToBack(t *testing.T) {
 // Sub-directories in the image directory must not break the draw: fetchImage
 // used to receive "" and hand it to a ReadImage that called os.Exit(1).
 func TestFetchImageIgnoresSubdirectories(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	writeTempPNG(t, imgDir, "only.png", gradientRGBA(64, 48))
 	for _, sub := range []string{"sub1", "sub2", "sub3"} {
@@ -1085,7 +1117,6 @@ func TestImageCandidatesOfferFilesWithoutADecodableExtension(t *testing.T) {
 // extension-less pictures behind it: preferring an extension is a hint about
 // what to try first, never a reason to leave a real picture unreachable.
 func TestFetchImageFallsPastACorruptPreferredFile(t *testing.T) {
-	silenceStdout(t)
 	imgDir := t.TempDir()
 	if err := writeFile(filepath.Join(imgDir, "cover.jpg"), ""); err != nil {
 		t.Fatal(err)
@@ -1183,58 +1214,12 @@ func TestImageCandidatesSingleFileStillServedAfterBeingServed(t *testing.T) {
 	}
 }
 
-// ===========================================================================
-// basicAuth middleware (currently not wired up in main())
-// ===========================================================================
-
-func TestBasicAuthRejectsMissingCredentials(t *testing.T) {
-	h := basicAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
-	}))
-	req := httptest.NewRequest(http.MethodPost, "/fetchImage", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("status %d, want 401", rec.Code)
-	}
-}
-
-func TestBasicAuthRejectsWrongCredentials(t *testing.T) {
-	h := basicAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
-	}))
-	for _, c := range [][2]string{{"username", "wrong"}, {"wrong", "password"}, {"", ""}} {
-		req := httptest.NewRequest(http.MethodPost, "/fetchImage", nil)
-		req.SetBasicAuth(c[0], c[1])
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("%v: status %d, want 401", c, rec.Code)
-		}
-	}
-}
-
-func TestBasicAuthAcceptsHardcodedCredentials(t *testing.T) {
-	// NOTE: the credentials are hard-coded to username/password in main.go:119.
-	// The middleware is deliberately not wired up (main.go:146 comments out
-	// r.Use(basicAuth)), so this only documents the helper.
-	h := basicAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
-	}))
-	req := httptest.NewRequest(http.MethodPost, "/fetchImage", nil)
-	req.SetBasicAuth("username", "password")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
-		t.Errorf("status %d body %q, want 200 'ok'", rec.Code, rec.Body.String())
-	}
-}
-
-// Documents the current posture: basicAuth is deliberately not wired into
-// newRouter, so no endpoint is authenticated. This exercises the production
-// router, so wiring auth in would fail here rather than pass silently.
+// Documents the current posture: no authentication middleware is wired into
+// newRouter, so no endpoint is authenticated — the firmware's "Server Auth
+// Header" is sent but never read, and enforcing it is a reverse proxy's job
+// (see README.md). This exercises the production router, so wiring auth in
+// would fail here rather than pass silently.
 func TestRoutesAreUnauthenticated(t *testing.T) {
-	silenceStdout(t)
 	for _, ep := range []string{"/fetchImage", "/calibrationImage", "/clearImage"} {
 		req := httptest.NewRequest(http.MethodPost, ep, strings.NewReader(`{}`))
 		rec := httptest.NewRecorder()
@@ -1272,5 +1257,43 @@ func TestRouterExposesExactlyTheThreeEndpoints(t *testing.T) {
 		if !want[route] {
 			t.Errorf("router exposes an unexpected route %q", route)
 		}
+	}
+}
+
+// ===========================================================================
+// Command line
+// ===========================================================================
+
+// service.nix interpolates `server <port> <imgDir>` by position, so the
+// positional form has to keep working exactly as it did before -bind existed —
+// and -bind has to be usable in front of it.
+func TestParseArgs(t *testing.T) {
+	const (
+		defPort = "8080"
+		defDir  = "./img"
+	)
+	cases := []struct {
+		name               string
+		args               []string
+		bind, port, imgDir string
+	}{
+		{"no arguments", nil, "0.0.0.0", defPort, defDir},
+		{"port only", []string{"18450"}, "0.0.0.0", "18450", defDir},
+		{"the service.nix form", []string{"18450", "/var/lib/stillframe-server/images"}, "0.0.0.0", "18450", "/var/lib/stillframe-server/images"},
+		{"bind before the positionals", []string{"-bind", "127.0.0.1", "18450", "/imgs"}, "127.0.0.1", "18450", "/imgs"},
+		{"bind as --flag=value", []string{"--bind=100.64.0.1", "18450"}, "100.64.0.1", "18450", defDir},
+		{"a directory with a space", []string{"18450", "/srv/my photos"}, "0.0.0.0", "18450", "/srv/my photos"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			bind, port, imgDir, err := parseArgs(c.args, defPort, defDir)
+			if err != nil {
+				t.Fatalf("parseArgs(%q): %v", c.args, err)
+			}
+			if bind != c.bind || port != c.port || imgDir != c.imgDir {
+				t.Errorf("got bind=%q port=%q imgDir=%q, want %q/%q/%q",
+					bind, port, imgDir, c.bind, c.port, c.imgDir)
+			}
+		})
 	}
 }
