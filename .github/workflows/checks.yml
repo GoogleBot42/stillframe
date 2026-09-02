@@ -9,6 +9,14 @@
 #   `github.server_url == 'https://github.com'` guard and this workflow runs on
 #   the GitHub mirror only. It never creates commits, tags or releases.
 #
+#   Read that as: Gitea gets NO CI. Nothing validates a push, branch or PR on
+#   the canonical repo until the push mirror has synced it here and this
+#   workflow has run. A broken commit can sit on Gitea main indefinitely with
+#   no red mark anywhere on Gitea, so the mirror's Actions tab is the only
+#   place to look. (A Gitea-only workflow under .gitea/workflows/ running the
+#   cheap checks would close that gap; it is a deliberate non-decision so far,
+#   because it means paying for a runner.)
+#
 # WHAT IT COVERS
 #   nix-check         `nix flake check`, which is:
 #                       checks.build     — the Go server (buildGoModule's

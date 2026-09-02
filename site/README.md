@@ -13,6 +13,15 @@ Gitea's push mirror, its Actions build the firmware, and its Pages site is what
 devices poll. **Never create commits, tags, or edits on GitHub directly** — all
 git data flows one way, Gitea → GitHub.
 
+**CI runs on the mirror only.** Gitea itself runs no CI at all: there is no
+`.gitea/workflows/`, and every job in `.github/workflows/` is guarded with
+`github.server_url == 'https://github.com'`, so even with Gitea Actions
+enabled every run there is a deliberate no-op. A push, branch, or PR on Gitea
+is validated by nothing until the push mirror has synced it to GitHub and the
+`Checks` workflow has run there. If the mirror stalls, a broken commit can sit
+on Gitea `main` indefinitely with no red mark anywhere — check the mirror's
+Actions tab, not Gitea's, before trusting a commit.
+
 ## How the pipeline works
 
 1. `.github/workflows/firmware.yml` fires on a pushed `vX.Y.Z` **tag** — and
